@@ -1,0 +1,90 @@
+name: Build nanoFramework.Azure.EventGrid.Mqtt
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'source/**'
+      - '*.nuspec'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'source/**'
+      - '*.nuspec'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-latest
+    name: Build & Pack
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+
+    - name: Install .NET nanoFramework Extension
+      run: |
+        # Install the nanoFramework MSBuild SDK
+        nuget install nanoFramework.Tools.MSBuildSystem -Source https://api.nuget.org/v3/index.json -OutputDirectory tools
+        $nfToolsPath = (Get-ChildItem -Path tools -Filter "nanoFramework.Tools.MSBuildSystem*" -Directory | Sort-Object Name -Descending | Select-Object -First 1).FullName
+        echo "NanoFrameworkProjectSystemPath=$nfToolsPath\tools\" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+    - name: Restore NuGet Packages
+      run: nuget restore source\packages.config -PackagesDirectory packages
+
+    - name: Build Library (Release)
+      run: |
+        msbuild source\nanoFramework.Azure.EventGrid.Mqtt.nfproj `
+          /p:Configuration=Release `
+          /p:NanoFrameworkProjectSystemPath="$env:NanoFrameworkProjectSystemPath" `
+          /restore:false `
+          /verbosity:minimal
+
+    - name: Pack NuGet Package
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      run: |
+        $versionJson = Get-Content version.json | ConvertFrom-Json
+        $version = "$($versionJson.version).${{ github.run_number }}"
+        nuget pack nanoFramework.Azure.EventGrid.Mqtt.nuspec -Version $version -OutputDirectory artifacts
+        Write-Host "Packed version $version"
+
+    - name: Upload NuGet Artifact
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@v4
+      with:
+        name: nuget-package
+        path: artifacts/*.nupkg
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    name: Publish to NuGet.org
+
+    steps:
+    - name: Download NuGet Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: nuget-package
+        path: artifacts
+
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+
+    - name: Push to NuGet.org
+      run: |
+        nuget push artifacts/*.nupkg -Source https://api.nuget.org/v3/index.json -ApiKey ${{ secrets.NUGET_API_KEY }} -SkipDuplicate
+      env:
+        NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
