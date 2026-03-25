@@ -164,6 +164,40 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// </summary>
         public string CertTopicPrefix { get; set; } = "devices";
 
+        // ───── Publish Retry ─────
+
+        /// <summary>
+        /// Maximum number of retry attempts for failed publish operations. Default is 0 (no retry).
+        /// When set to a value greater than 0, publishes that fail will be retried with exponential backoff.
+        /// </summary>
+        public int PublishMaxRetries { get; set; } = 0;
+
+        /// <summary>
+        /// Base delay in milliseconds between publish retry attempts. Default is 1000ms.
+        /// The delay doubles after each failed attempt up to <see cref="PublishRetryMaxDelayMs"/>.
+        /// </summary>
+        public int PublishRetryBaseDelayMs { get; set; } = 1000;
+
+        /// <summary>
+        /// Maximum delay in milliseconds between publish retry attempts. Default is 30000ms.
+        /// </summary>
+        public int PublishRetryMaxDelayMs { get; set; } = 30000;
+
+        // ───── Memory Management ─────
+
+        /// <summary>
+        /// Maximum payload size in bytes. Default is 0 (no limit).
+        /// Recommended: 8192 (8KB) for ESP32 to prevent out-of-memory during JSON serialization.
+        /// Publishes exceeding this limit will throw <see cref="System.ArgumentException"/>.
+        /// </summary>
+        public int MaxPayloadSize { get; set; } = 0;
+
+        /// <summary>
+        /// Whether to run garbage collection between publish operations when memory is low.
+        /// Default is true. Helps prevent heap fragmentation on long-running ESP32 devices.
+        /// </summary>
+        public bool AutoGarbageCollect { get; set; } = true;
+
         // ───── Logging ─────
 
         /// <summary>

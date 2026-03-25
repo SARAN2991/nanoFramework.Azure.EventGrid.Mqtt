@@ -70,6 +70,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private readonly X509Certificate _caCert;
         private X509Certificate2 _clientCert;
         private readonly ConnectionManager _connectionManager;
+        private readonly RetryHandler _publishRetryHandler;
         private readonly ArrayList _subscribedTopics;
         private readonly ArrayList _subscribedQos;
         private readonly ArrayList _messageHandlers;
@@ -150,6 +151,17 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _subscribedQos = new ArrayList();
             _messageHandlers = new ArrayList();
 
+            // Set up publish retry handler
+            if (_config.PublishMaxRetries > 0)
+            {
+                _publishRetryHandler = new RetryHandler(
+                    _config.PublishMaxRetries,
+                    _config.PublishRetryBaseDelayMs,
+                    _config.PublishRetryMaxDelayMs,
+                    _logger);
+                _logger.LogInfo("Publish retry enabled: " + _config.PublishMaxRetries + " max retries.");
+            }
+
             // Parse certificates
             _logger.LogInfo("Parsing certificates...");
 
@@ -164,7 +176,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             // Set up connection manager
             if (_config.AutoReconnect)
             {
-                _connectionManager = new ConnectionManager(_config);
+                _connectionManager = new ConnectionManager(_config, _logger);
                 _connectionManager.TryReconnect = AttemptReconnect;
 
                 _connectionManager.Reconnected += (s, e) =>
@@ -187,7 +199,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             // Set up Device Twin manager
             if (_config.EnableDeviceTwin)
             {
-                _twinManager = new DeviceTwinManager(_config.DeviceClientId, _config.TwinTopicPrefix);
+                _twinManager = new DeviceTwinManager(_config.DeviceClientId, _config.TwinTopicPrefix, _logger);
                 _messageHandlers.Add(_twinManager);
                 _logger.LogInfo("Device Twin enabled.");
             }
@@ -198,7 +210,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _healthReporter = new HealthReporter(
                     _config.DeviceClientId,
                     _config.HealthReportIntervalMs,
-                    _config.HealthTopicPrefix);
+                    _config.HealthTopicPrefix,
+                    _logger);
                 _logger.LogInfo("Health Reporting enabled.");
             }
 
@@ -385,6 +398,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
         /// <summary>
         /// Publishes a string payload to an MQTT topic.
+        /// If publish retry is enabled (see <see cref="EventGridMqttConfig.PublishMaxRetries"/>),
+        /// failed publishes are automatically retried with exponential backoff.
         /// </summary>
         /// <param name="topic">The topic to publish to.</param>
         /// <param name="payload">The string payload (typically JSON).</param>
@@ -392,6 +407,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <param name="retain">Whether to set the retain flag. Default is false.</param>
         /// <returns>The message ID (0 for QoS 0).</returns>
         /// <exception cref="InvalidOperationException">Thrown when not connected.</exception>
+        /// <exception cref="ArgumentException">Thrown when topic is empty or payload exceeds max size.</exception>
         public ushort Publish(string topic, string payload, MqttQoSLevel qos = MqttQoSLevel.AtMostOnce, bool retain = false)
         {
             ThrowIfDisposed();
@@ -408,7 +424,45 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             byte[] payloadBytes = Encoding.UTF8.GetBytes(payload ?? "");
 
+            // Validate payload size for ESP32 memory safety
+            if (_config.MaxPayloadSize > 0 && payloadBytes.Length > _config.MaxPayloadSize)
+            {
+                throw new ArgumentException(
+                    "Payload size (" + payloadBytes.Length + " bytes) exceeds maximum (" + _config.MaxPayloadSize + " bytes).");
+            }
+
+            // Auto GC if memory is low
+            if (_config.AutoGarbageCollect)
+            {
+                MemoryManager.CollectIfNeeded();
+            }
+
             _healthReporter?.IncrementPublished();
+
+            // Use retry handler if configured
+            if (_publishRetryHandler != null)
+            {
+                ushort msgId = 0;
+                string topicCapture = topic;
+                byte[] bytesCapture = payloadBytes;
+                MqttQoSLevel qosCapture = qos;
+                bool retainCapture = retain;
+
+                bool success = _publishRetryHandler.ExecuteWithRetry(
+                    () =>
+                    {
+                        msgId = _mqttClient.Publish(topicCapture, bytesCapture, null, null, qosCapture, retainCapture);
+                        return true;
+                    },
+                    "Publish to " + topic);
+
+                if (!success)
+                {
+                    _logger.LogError("Publish failed after retries: " + topic);
+                }
+
+                return msgId;
+            }
 
             return _mqttClient.Publish(topic, payloadBytes, null, null, qos, retain);
         }
@@ -429,12 +483,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
         /// <summary>
         /// Publishes raw byte array payload to an MQTT topic.
+        /// Supports retry with exponential backoff if configured.
         /// </summary>
         /// <param name="topic">The topic to publish to.</param>
         /// <param name="payload">The raw byte payload.</param>
         /// <param name="qos">QoS level. Default is AtMostOnce (QoS 0).</param>
         /// <param name="retain">Whether to set the retain flag. Default is false.</param>
         /// <returns>The message ID (0 for QoS 0).</returns>
+        /// <exception cref="ArgumentException">Thrown when payload exceeds max size.</exception>
         public ushort PublishRaw(string topic, byte[] payload, MqttQoSLevel qos = MqttQoSLevel.AtMostOnce, bool retain = false)
         {
             ThrowIfDisposed();
@@ -444,7 +500,38 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 throw new InvalidOperationException("Cannot publish: not connected.");
             }
 
+            // Validate payload size for ESP32 memory safety
+            if (_config.MaxPayloadSize > 0 && payload != null && payload.Length > _config.MaxPayloadSize)
+            {
+                throw new ArgumentException(
+                    "Payload size (" + payload.Length + " bytes) exceeds maximum (" + _config.MaxPayloadSize + " bytes).");
+            }
+
+            if (_config.AutoGarbageCollect)
+            {
+                MemoryManager.CollectIfNeeded();
+            }
+
             _healthReporter?.IncrementPublished();
+
+            if (_publishRetryHandler != null)
+            {
+                ushort msgId = 0;
+                string topicCapture = topic;
+                byte[] bytesCapture = payload;
+                MqttQoSLevel qosCapture = qos;
+                bool retainCapture = retain;
+
+                _publishRetryHandler.ExecuteWithRetry(
+                    () =>
+                    {
+                        msgId = _mqttClient.Publish(topicCapture, bytesCapture, null, null, qosCapture, retainCapture);
+                        return true;
+                    },
+                    "PublishRaw to " + topic);
+
+                return msgId;
+            }
 
             return _mqttClient.Publish(topic, payload, null, null, qos, retain);
         }
@@ -952,6 +1039,87 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             string json = _twinManager.BuildGetDesiredStateRequest();
             Publish(_twinManager.GetTopic, json, MqttQoSLevel.AtLeastOnce);
+        }
+
+        // ───── Convenience Methods ─────
+
+        /// <summary>
+        /// Connects to the broker and subscribes to one or more topics in a single call.
+        /// Simplifies the common pattern of connect → subscribe → ready.
+        /// </summary>
+        /// <param name="topics">Topics to subscribe to after connecting.</param>
+        /// <returns>The MQTT reason code from the connection attempt.</returns>
+        /// <example>
+        /// <code>
+        /// client.ConnectAndSubscribe("devices/myDevice/commands", "devices/myDevice/config");
+        /// </code>
+        /// </example>
+        public MqttReasonCode ConnectAndSubscribe(params string[] topics)
+        {
+            var result = Connect();
+
+            if (result == MqttReasonCode.Success && topics != null)
+            {
+                for (int i = 0; i < topics.Length; i++)
+                {
+                    if (topics[i] != null && topics[i].Length > 0)
+                    {
+                        Subscribe(topics[i], MqttQoSLevel.AtLeastOnce);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Publishes telemetry data as JSON to the standard telemetry topic.
+        /// Topic format: <c>{prefix}/{deviceId}/telemetry</c>.
+        /// </summary>
+        /// <param name="data">The telemetry object to serialize as JSON.</param>
+        /// <param name="topicPrefix">Topic prefix. Default is "devices".</param>
+        /// <param name="qos">QoS level. Default is AtMostOnce.</param>
+        /// <returns>The message ID (0 for QoS 0).</returns>
+        /// <example>
+        /// <code>
+        /// client.PublishTelemetry(new { Temperature = 23.5, Humidity = 67.2 });
+        /// </code>
+        /// </example>
+        public ushort PublishTelemetry(object data, string topicPrefix = "devices", MqttQoSLevel qos = MqttQoSLevel.AtMostOnce)
+        {
+            string topic = (topicPrefix ?? "devices") + "/" + _config.DeviceClientId + "/telemetry";
+            return PublishJson(topic, data, qos);
+        }
+
+        /// <summary>
+        /// Publishes a simple status message to the standard status topic.
+        /// Topic format: <c>{prefix}/{deviceId}/status</c>.
+        /// </summary>
+        /// <param name="status">Status string (e.g., "online", "offline", "maintenance").</param>
+        /// <param name="topicPrefix">Topic prefix. Default is "devices".</param>
+        /// <returns>The message ID.</returns>
+        public ushort PublishStatus(string status, string topicPrefix = "devices")
+        {
+            string topic = (topicPrefix ?? "devices") + "/" + _config.DeviceClientId + "/status";
+            string json = "{\"deviceId\":\"" + _config.DeviceClientId + "\",\"status\":\"" + (status ?? "unknown") +
+                          "\",\"timestamp\":\"" + DateTime.UtcNow.ToString("o") + "\"}";
+            return Publish(topic, json, MqttQoSLevel.AtLeastOnce);
+        }
+
+        /// <summary>
+        /// Gets the publish retry handler for monitoring retry statistics.
+        /// Null if publish retry is not enabled.
+        /// </summary>
+        public RetryHandler PublishRetry => _publishRetryHandler;
+
+        /// <summary>
+        /// Gets the current free memory on the device in bytes.
+        /// Convenience wrapper for <see cref="MemoryManager.GetFreeMemory"/>.
+        /// </summary>
+        /// <returns>Free memory in bytes, or -1 if unavailable.</returns>
+        public long GetFreeMemory()
+        {
+            return MemoryManager.GetFreeMemory();
         }
 
         #endregion

@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections;
-using System.Diagnostics;
 using System.Threading;
 using nanoFramework.Json;
 
@@ -64,6 +63,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private readonly string _deviceId;
         private readonly string _healthTopic;
         private readonly int _intervalMs;
+        private readonly ILogger _logger;
         private Thread _reportThread;
         private bool _isRunning;
         private bool _disposed;
@@ -136,7 +136,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <param name="deviceId">The device client ID.</param>
         /// <param name="intervalMs">Reporting interval in milliseconds. Default is 60000 (60 seconds).</param>
         /// <param name="topicPrefix">Topic prefix. Default is "devices".</param>
-        public HealthReporter(string deviceId, int intervalMs = 60000, string topicPrefix = "devices")
+        /// <param name="logger">Optional logger for health reporting diagnostics.</param>
+        public HealthReporter(string deviceId, int intervalMs = 60000, string topicPrefix = "devices", ILogger logger = null)
         {
             if (deviceId == null || deviceId.Length == 0)
             {
@@ -160,6 +161,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _isConnected = false;
             _isRunning = false;
             _disposed = false;
+            _logger = logger;
         }
 
         /// <summary>
@@ -219,7 +221,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             if (_isRunning)
             {
-                Debug.WriteLine("[Health] Reporter is already running.");
+                _logger?.LogInfo("Health Reporter is already running.");
                 return;
             }
 
@@ -234,7 +236,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _reportThread.Priority = ThreadPriority.BelowNormal;
             _reportThread.Start();
 
-            Debug.WriteLine($"[Health] Started reporting every {_intervalMs / 1000}s on '{_healthTopic}'");
+            _logger?.LogInfo("Health Reporter started: every " + (_intervalMs / 1000) + "s on '" + _healthTopic + "'");
         }
 
         /// <summary>
@@ -244,7 +246,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             _isRunning = false;
 
-            Debug.WriteLine("[Health] Reporter stopped.");
+            _logger?.LogInfo("Health Reporter stopped.");
         }
 
         /// <summary>
@@ -321,18 +323,18 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                     if (!_isConnected)
                     {
-                        Debug.WriteLine("[Health] Skipping report — not connected.");
+                        _logger?.LogInfo("Health: skipping report — not connected.");
                         continue;
                     }
 
                     string report = BuildHealthReport();
                     publishAction(_healthTopic, report);
 
-                    Debug.WriteLine($"[Health] Report #{_sequenceNumber} published.");
+                    _logger?.LogInfo("Health report #" + _sequenceNumber + " published.");
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[Health] Report failed: {ex.Message}");
+                    _logger?.LogError("Health report failed: " + ex.Message);
                 }
             }
         }

@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
-using System.Diagnostics;
 using System.Threading;
 
 namespace nanoFramework.Azure.EventGrid.Mqtt
@@ -18,9 +17,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
     /// Manages automatic reconnection to the Azure EventGrid MQTT broker
     /// with exponential backoff strategy.
     /// </summary>
+    /// <remarks>
+    /// Backoff algorithm: delay = initialDelay * 2^(attempt-1), capped at maxDelay.
+    /// This prevents overwhelming the broker during outages and reduces battery drain on ESP32.
+    /// </remarks>
     internal class ConnectionManager
     {
         private readonly EventGridMqttConfig _config;
+        private readonly ILogger _logger;
         private Thread _reconnectThread;
         private bool _isRunning;
         private readonly object _lock = new object();
@@ -51,9 +55,11 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// Initializes a new instance of the <see cref="ConnectionManager"/> class.
         /// </summary>
         /// <param name="config">The EventGrid MQTT configuration containing reconnect settings.</param>
-        public ConnectionManager(EventGridMqttConfig config)
+        /// <param name="logger">Optional logger for reconnection diagnostics.</param>
+        public ConnectionManager(EventGridMqttConfig config, ILogger logger = null)
         {
             _config = config;
+            _logger = logger;
             _isRunning = false;
             _currentAttempt = 0;
         }
@@ -123,7 +129,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 // Check if max attempts exceeded
                 if (_config.MaxReconnectAttempts > 0 && _currentAttempt > _config.MaxReconnectAttempts)
                 {
-                    Debug.WriteLine($"[EventGridMqtt] Max reconnect attempts ({_config.MaxReconnectAttempts}) reached.");
+                    _logger?.LogError("Max reconnect attempts (" + _config.MaxReconnectAttempts + ") reached.");
 
                     ReconnectFailed?.Invoke(this, new ConnectionStateChangedEventArgs(
                         false,
@@ -138,7 +144,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     return;
                 }
 
-                Debug.WriteLine($"[EventGridMqtt] Reconnect attempt {_currentAttempt}, waiting {currentDelay}ms...");
+                _logger?.LogInfo("Reconnect attempt " + _currentAttempt + ", waiting " + currentDelay + "ms...");
 
                 // Wait before attempting
                 Thread.Sleep(currentDelay);
@@ -164,13 +170,13 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[EventGridMqtt] Reconnect attempt {_currentAttempt} threw: {ex.Message}");
+                    _logger?.LogError("Reconnect attempt " + _currentAttempt + " threw: " + ex.Message);
                     success = false;
                 }
 
                 if (success)
                 {
-                    Debug.WriteLine($"[EventGridMqtt] Reconnected successfully after {_currentAttempt} attempt(s).");
+                    _logger?.LogInfo("Reconnected successfully after " + _currentAttempt + " attempt(s).");
 
                     Reconnected?.Invoke(this, new ConnectionStateChangedEventArgs(
                         true,
@@ -186,7 +192,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 }
                 else
                 {
-                    Debug.WriteLine($"[EventGridMqtt] Reconnect attempt {_currentAttempt} failed.");
+                    _logger?.LogInfo("Reconnect attempt " + _currentAttempt + " failed.");
 
                     ReconnectAttemptFailed?.Invoke(this, new ConnectionStateChangedEventArgs(
                         false,

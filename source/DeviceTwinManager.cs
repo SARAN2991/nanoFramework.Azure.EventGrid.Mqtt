@@ -3,8 +3,6 @@
 
 using System;
 using System.Collections;
-using System.Diagnostics;
-using System.Text;
 using nanoFramework.Json;
 
 namespace nanoFramework.Azure.EventGrid.Mqtt
@@ -75,6 +73,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
     public class DeviceTwinManager : IMqttMessageHandler
     {
         private readonly string _deviceId;
+        private readonly ILogger _logger;
         private readonly Hashtable _reportedState;
         private readonly Hashtable _desiredState;
         private readonly object _stateLock = new object();
@@ -132,7 +131,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// </summary>
         /// <param name="deviceId">The device client ID.</param>
         /// <param name="topicPrefix">Optional topic prefix. Default is "devices".</param>
-        public DeviceTwinManager(string deviceId, string topicPrefix = "devices")
+        /// <param name="logger">Optional logger for twin diagnostics.</param>
+        public DeviceTwinManager(string deviceId, string topicPrefix = "devices", ILogger logger = null)
         {
             if (deviceId == null || deviceId.Length == 0)
             {
@@ -140,6 +140,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
 
             _deviceId = deviceId;
+            _logger = logger;
             TopicPrefix = topicPrefix ?? "devices";
             _reportedState = new Hashtable();
             _desiredState = new Hashtable();
@@ -191,7 +192,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             payload["timestamp"] = DateTime.UtcNow.ToString("o");
 
             string json = JsonConvert.SerializeObject(payload);
-            Debug.WriteLine($"[DeviceTwin] Reported property updated: {key} = {value}");
+            _logger?.LogInfo("DeviceTwin: Reported property updated: " + key + " = " + value);
             return json;
         }
 
@@ -225,7 +226,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             payload["timestamp"] = DateTime.UtcNow.ToString("o");
 
             string json = JsonConvert.SerializeObject(payload);
-            Debug.WriteLine($"[DeviceTwin] Reported {properties.Count} properties (v{_reportedVersion})");
+            _logger?.LogInfo("DeviceTwin: Reported " + properties.Count + " properties (v" + _reportedVersion + ")");
             return json;
         }
 
@@ -324,7 +325,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _reportedVersion++;
             }
 
-            Debug.WriteLine("[DeviceTwin] Reported state cleared.");
+            _logger?.LogInfo("DeviceTwin: Reported state cleared.");
         }
 
         #region Private Methods
@@ -338,7 +339,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 if (incoming == null)
                 {
-                    Debug.WriteLine("[DeviceTwin] Failed to parse desired state payload.");
+                    _logger?.LogWarning("DeviceTwin: Failed to parse desired state payload.");
                     return;
                 }
 
@@ -399,14 +400,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     }
                 }
 
-                Debug.WriteLine($"[DeviceTwin] Desired state updated (v{_desiredVersion})");
+                _logger?.LogInfo("DeviceTwin: Desired state updated (v" + _desiredVersion + ")");
 
                 DesiredStateChanged?.Invoke(this, new DesiredStateChangedEventArgs(
                     payload, propertyKey, propertyValue, _desiredVersion));
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[DeviceTwin] Error processing desired state: {ex.Message}");
+                _logger?.LogError("DeviceTwin: Error processing desired state: " + ex.Message);
             }
         }
 

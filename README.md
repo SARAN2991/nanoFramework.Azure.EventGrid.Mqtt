@@ -12,11 +12,13 @@ A production-ready MQTT client library for **.NET nanoFramework** that simplifie
 |---|---|
 | **Core** | `Connect()`, `Publish()`, `Subscribe()`, `Disconnect()` — simple, developer-friendly API |
 | **Security** | X.509 certificate authentication with PEM string input; TLS 1.2; configurable auth |
-| **Reliability** | Automatic reconnection with exponential backoff; subscription persistence across reconnects |
+| **Reliability** | Automatic reconnection with exponential backoff; publish retry with jitter; subscription persistence across reconnects |
+| **Memory** | ESP32-optimized memory management; payload size limits; auto garbage collection; low-memory detection |
 | **Protocol** | MQTT v5.0 and v3.1.1; Last Will & Testament (LWT); JSON auto-serialization |
 | **Device Twin** | Desired/reported state synchronization over MQTT topics |
 | **Health** | Periodic heartbeat with uptime, free memory, message counters, custom metrics |
 | **Certificates** | Expiry monitoring, OTA certificate rotation via MQTT, runtime cert swap |
+| **Developer UX** | Fluent `EventGridMqttClientBuilder`; one-liner `ConnectAndSubscribe()`; `PublishTelemetry()` / `PublishStatus()` helpers |
 | **Extensibility** | `IEventGridMqttClient` interface; `ILogger` for pluggable logging; `IMqttMessageHandler` for custom modules |
 
 ## Prerequisites
@@ -40,6 +42,38 @@ Install-Package nanoFramework.Azure.EventGrid.Mqtt -Version 0.1.0-preview
 Or add it via the NuGet Package Manager in your nanoFramework project.
 
 ## Quick Start
+
+### Using the Fluent Builder (Recommended)
+
+```csharp
+using nanoFramework.Azure.EventGrid.Mqtt;
+
+var client = new EventGridMqttClientBuilder()
+    .WithBroker("my-namespace.westeurope-1.ts.eventgrid.azure.net")
+    .WithDevice("esp32-device-001")
+    .WithCertificates(caCert, clientCert, clientKey)
+    .WithAutoReconnect()
+    .WithPublishRetry(maxRetries: 3)
+    .BuildAndConnect();
+
+client.Subscribe("devices/esp32-device-001/commands");
+client.PublishTelemetry(new { temp = 23.5, humidity = 65.0 });
+
+Thread.Sleep(Timeout.Infinite);
+```
+
+### One-Liner Connect + Subscribe
+
+```csharp
+var client = new EventGridMqttClientBuilder()
+    .WithBroker(hostname).WithDevice(deviceId)
+    .WithCertificates(ca, cert, key)
+    .BuildAndConnect();
+
+client.ConnectAndSubscribe("devices/my-device/commands", "devices/my-device/config");
+```
+
+### Manual Configuration
 
 ```csharp
 using nanoFramework.Azure.EventGrid.Mqtt;
@@ -87,6 +121,10 @@ The main client class implements `IEventGridMqttClient` and `IDisposable`.
 | `UpdateTwinProperty(key, value)` | Shortcut to update a reported twin property and publish. |
 | `RequestDesiredTwinState()` | Requests the current desired state from the cloud. |
 | `ApplyCertificateRotation()` | Applies a pending certificate and reconnects. |
+| `ConnectAndSubscribe(topics)` | Connects and subscribes to multiple topics in one call. |
+| `PublishTelemetry(data, prefix, qos)` | Serializes + publishes to `devices/{id}/telemetry`. |
+| `PublishStatus(status, prefix)` | Publishes a status string to `devices/{id}/status`. |
+| `GetFreeMemory()` | Returns current free memory in bytes via GC. |
 
 | Property | Description |
 |---|---|
@@ -96,6 +134,7 @@ The main client class implements `IEventGridMqttClient` and `IDisposable`.
 | `Twin` | `DeviceTwinManager` instance (null if disabled). |
 | `Health` | `HealthReporter` instance (null if disabled). |
 | `CertRotation` | `CertificateRotationManager` instance (null if disabled). |
+| `PublishRetry` | `RetryHandler` instance (null if retry not configured). |
 
 | Event | Description |
 |---|---|
@@ -143,10 +182,107 @@ var config = new EventGridMqttConfig
     CertWarningDaysBeforeExpiry  = 30,
     CertCheckIntervalMs          = 3600000,
 
+    // Publish Retry (optional)
+    PublishMaxRetries       = 3,            // 0 = no retry (default)
+    PublishRetryBaseDelayMs = 1000,         // initial retry delay
+    PublishRetryMaxDelayMs  = 30000,        // max retry delay
+
+    // ESP32 Memory Management (optional)
+    MaxPayloadSize     = 8192,              // 0 = no limit (default)
+    AutoGarbageCollect = true,              // GC when memory is low
+
     // Logging (optional)
     Logger = new DebugLogger(),   // or NullLogger, or custom ILogger
 };
 ```
+
+## Fluent Builder API
+
+The `EventGridMqttClientBuilder` provides a chainable API to configure and create clients:
+
+```csharp
+var client = new EventGridMqttClientBuilder()
+    .WithBroker("ns.westeurope-1.ts.eventgrid.azure.net", port: 8883)
+    .WithDevice("esp32-001")
+    .WithCertificates(caCert, clientCert, clientKey)
+    .WithAutoReconnect(maxAttempts: 10, initialDelayMs: 5000, maxDelayMs: 60000)
+    .WithPublishRetry(maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 30000)
+    .WithLastWill("devices/esp32-001/status", "{\"status\":\"offline\"}")
+    .WithDeviceTwin()
+    .WithHealthReporting(intervalMs: 30000)
+    .WithCertificateRotation(warningDays: 30)
+    .WithMaxPayloadSize(8192)
+    .WithLogger(new DebugLogger())
+    .Build();
+```
+
+| Method | Description |
+|---|---|
+| `WithBroker(hostname, port)` | Sets the MQTT broker endpoint |
+| `WithDevice(clientId)` | Sets the device client ID |
+| `WithCertificates(ca, cert, key)` | Sets all three PEM certificate strings |
+| `WithAutoReconnect(...)` | Enables auto-reconnect with backoff configuration |
+| `WithPublishRetry(...)` | Enables publish retry with exponential backoff |
+| `WithLastWill(topic, message)` | Sets LWT for offline detection |
+| `WithDeviceTwin(prefix)` | Enables device twin synchronization |
+| `WithHealthReporting(intervalMs)` | Enables periodic health heartbeat |
+| `WithCertificateRotation(...)` | Enables certificate lifecycle management |
+| `WithMaxPayloadSize(bytes)` | Sets max publish payload size (ESP32 memory safety) |
+| `WithLogger(logger)` / `WithSilentLogging()` | Configures logging |
+| `Build()` | Creates the client (does not connect) |
+| `BuildAndConnect()` | Creates the client and immediately connects |
+| `BuildConfig()` | Returns the `EventGridMqttConfig` without creating a client |
+
+## Publish Retry with Exponential Backoff
+
+When `PublishMaxRetries > 0`, failed publishes are automatically retried with exponential backoff and jitter to prevent thundering herd:
+
+```csharp
+var client = new EventGridMqttClientBuilder()
+    .WithBroker(hostname).WithDevice(deviceId)
+    .WithCertificates(ca, cert, key)
+    .WithPublishRetry(maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 30000)
+    .BuildAndConnect();
+
+// Publishes are automatically retried on failure
+client.Publish("devices/esp32/telemetry", payload, MqttQoSLevel.AtLeastOnce);
+
+// Check retry statistics
+Debug.WriteLine($"Total retries: {client.PublishRetry.TotalRetries}");
+Debug.WriteLine($"Total failures: {client.PublishRetry.TotalFailures}");
+client.PublishRetry.ResetStatistics();
+```
+
+**Backoff formula:** `delay = baseDelay * 2^(attempt-1) + jitter`, capped at `maxDelayMs`.
+
+## ESP32 Memory Management
+
+The `MemoryManager` static class helps prevent out-of-memory crashes on memory-constrained ESP32 devices:
+
+```csharp
+// Payload size validation (automatic when MaxPayloadSize is set)
+config.MaxPayloadSize = 8192; // reject payloads > 8KB
+
+// Auto GC collection before publish when memory is low
+config.AutoGarbageCollect = true;
+
+// Manual memory checks
+uint freeMemory = MemoryManager.GetFreeMemory();
+bool isLow = MemoryManager.IsLowMemory;       // < 32KB free
+bool isCritical = MemoryManager.IsCriticalMemory; // < 16KB free
+
+// Safe payload check
+if (MemoryManager.IsPayloadSizeSafe(myPayload.Length))
+{
+    client.Publish(topic, myPayload);
+}
+```
+
+| Constant | Value | Description |
+|---|---|---|
+| `DefaultLowMemoryThreshold` | 32,768 bytes | Warning threshold |
+| `DefaultCriticalMemoryThreshold` | 16,384 bytes | Critical threshold |
+| `DefaultMaxPayloadSize` | 8,192 bytes | Default max payload size |
 
 ## Extensibility
 
@@ -420,20 +556,25 @@ nuget push nanoFramework.Azure.EventGrid.Mqtt.0.1.0-preview.nupkg \
 
 ```
 source/
-  IEventGridMqttClient.cs     # Client interface for DI/testing
-  ILogger.cs                   # Logging abstraction + DebugLogger, NullLogger
-  IMqttMessageHandler.cs       # Extensible message handler interface
-  EventGridMqttClient.cs       # Main client implementation
-  EventGridMqttConfig.cs       # Configuration class
-  EventGridMqttEventArgs.cs    # Event argument types
-  ConnectionManager.cs         # Auto-reconnect with exponential backoff
-  CertificateHelper.cs         # X.509 certificate parsing from PEM
-  TopicHelper.cs               # Topic building and validation
-  DeviceTwinManager.cs         # Device twin state synchronization
-  HealthReporter.cs            # Periodic health heartbeat
-  CertificateRotationManager.cs # Certificate lifecycle management
+  IEventGridMqttClient.cs        # Client interface for DI/testing
+  ILogger.cs                     # Logging abstraction + DebugLogger, NullLogger
+  IMqttMessageHandler.cs         # Extensible message handler interface
+  EventGridMqttClient.cs         # Main client implementation
+  EventGridMqttClientBuilder.cs  # Fluent builder for easy configuration
+  EventGridMqttConfig.cs         # Configuration class
+  EventGridMqttEventArgs.cs      # Event argument types
+  ConnectionManager.cs           # Auto-reconnect with exponential backoff
+  RetryHandler.cs                # Publish retry with exponential backoff + jitter
+  MemoryManager.cs               # ESP32 memory management utilities
+  CertificateHelper.cs           # X.509 certificate parsing from PEM
+  TopicHelper.cs                 # Topic building and validation
+  DeviceTwinManager.cs           # Device twin state synchronization
+  HealthReporter.cs              # Periodic health heartbeat
+  CertificateRotationManager.cs  # Certificate lifecycle management
 samples/
-  BasicUsage/                  # Complete sample application
+  BasicUsage/                    # Complete sample — manual config
+  MinimalSample/                 # Minimal sample — fluent builder + one-liners
+  RetryAndResilience/            # Full resilience demo — retry, memory, health
 ```
 
 ## Contributing

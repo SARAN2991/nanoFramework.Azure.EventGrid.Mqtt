@@ -51,6 +51,9 @@
     <Compile Include="IEventGridMqttClient.cs" />
     <Compile Include="ILogger.cs" />
     <Compile Include="IMqttMessageHandler.cs" />
+    <Compile Include="MemoryManager.cs" />
+    <Compile Include="RetryHandler.cs" />
+    <Compile Include="EventGridMqttClientBuilder.cs" />
     <Compile Include="TopicHelper.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

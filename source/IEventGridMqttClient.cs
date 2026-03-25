@@ -98,5 +98,40 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// </summary>
         /// <param name="topic">The topic to unsubscribe from.</param>
         void Unsubscribe(string topic);
+
+        /// <summary>
+        /// Connects to the broker and subscribes to one or more topics in a single call.
+        /// </summary>
+        /// <param name="topics">The topics to subscribe to after connecting.</param>
+        /// <returns>The MQTT reason code from the connect operation.</returns>
+        MqttReasonCode ConnectAndSubscribe(params string[] topics);
+
+        /// <summary>
+        /// Publishes a telemetry data object as JSON to a standard telemetry topic.
+        /// </summary>
+        /// <param name="data">The telemetry object to serialize.</param>
+        /// <param name="topicPrefix">Optional topic prefix. Defaults to "devices/{clientId}/telemetry".</param>
+        /// <param name="qos">QoS level. Default is AtMostOnce (QoS 0).</param>
+        /// <returns>The message ID (0 for QoS 0).</returns>
+        ushort PublishTelemetry(object data, string topicPrefix = null, MqttQoSLevel qos = MqttQoSLevel.AtMostOnce);
+
+        /// <summary>
+        /// Publishes a device status string to a standard status topic.
+        /// </summary>
+        /// <param name="status">The status string (e.g., "online", "offline", "error").</param>
+        /// <param name="topicPrefix">Optional topic prefix. Defaults to "devices/{clientId}/status".</param>
+        /// <returns>The message ID.</returns>
+        ushort PublishStatus(string status, string topicPrefix = null);
+
+        /// <summary>
+        /// Gets the publish retry handler, or null if retry is not configured.
+        /// </summary>
+        RetryHandler PublishRetry { get; }
+
+        /// <summary>
+        /// Returns the current free memory in bytes (via GC).
+        /// </summary>
+        /// <returns>Free memory in bytes.</returns>
+        uint GetFreeMemory();
     }
 }
