@@ -1,6 +1,6 @@
 # The MIT License (MIT)
 
-Copyright (c) .NET Foundation and Contributors
+Copyright (c) 2026 Saravanan Ganesan
 
 All rights reserved.
 
