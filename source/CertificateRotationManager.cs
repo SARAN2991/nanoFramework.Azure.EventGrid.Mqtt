@@ -188,8 +188,10 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
         /// <summary>
         /// Gets the new client private key PEM after a rotation. Null if no rotation has occurred.
+        /// Kept internal to prevent accidental exposure of sensitive key material.
+        /// Cleared automatically after <see cref="ApplyPendingCertificate"/> is called.
         /// </summary>
-        public string NewPrivateKeyPem { get; private set; }
+        internal string NewPrivateKeyPem { get; private set; }
 
         /// <summary>
         /// Gets whether a new certificate is pending (received but not yet applied).
@@ -284,11 +286,12 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
-        /// Stops monitoring certificate expiry.
+        /// Stops monitoring certificate expiry. Wakes the background thread immediately.
         /// </summary>
         public void StopMonitoring()
         {
             _isMonitoring = false;
+            _monitorThread?.Interrupt();
             _logger?.LogInfo("CertRotation: Monitoring stopped.");
         }
 
@@ -324,7 +327,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <returns>True if the certificate is valid and accepted, false otherwise.</returns>
         public bool SetNewCertificate(string newCertPem, string newKeyPem)
         {
-            if (!CertificateHelper.ValidateCertificateStrings("dummy-ca", newCertPem, newKeyPem))
+            if (!CertificateHelper.ValidateClientCertificateStrings(newCertPem, newKeyPem))
             {
                 _logger?.LogError("CertRotation: New certificate validation failed.");
                 return false;
@@ -378,8 +381,9 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
         /// <summary>
         /// Gets the current private key PEM (after any rotations).
+        /// Kept internal to prevent accidental exposure of sensitive key material.
         /// </summary>
-        public string CurrentPrivateKeyPem => _currentKeyPem;
+        internal string CurrentPrivateKeyPem => _currentKeyPem;
 
         /// <summary>
         /// Builds a certificate status JSON payload for publishing.
@@ -448,12 +452,19 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 try
                 {
                     Thread.Sleep(_checkIntervalMs);
+                }
+                catch (ThreadInterruptedException)
+                {
+                    return;
+                }
 
-                    if (!_isMonitoring || _disposed)
-                    {
-                        break;
-                    }
+                if (!_isMonitoring || _disposed)
+                {
+                    break;
+                }
 
+                try
+                {
                     if (_certExpiryUtc == DateTime.MinValue)
                     {
                         continue;

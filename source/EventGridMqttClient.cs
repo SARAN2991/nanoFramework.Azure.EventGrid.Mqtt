@@ -67,6 +67,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private X509Certificate2 _clientCert;
         private readonly ConnectionManager _connectionManager;
         private readonly RetryHandler _publishRetryHandler;
+        // Pre-allocated delegate to avoid per-publish closure allocation on the embedded heap.
+        private readonly DirectPublishAction _transportPublishDelegate;
         private readonly ArrayList _subscribedTopics;
         private readonly ArrayList _subscribedQos;
         private readonly ArrayList _messageHandlers;
@@ -158,7 +160,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             ValidateConfig(config);
 
             _config = config;
-            _logger = config.Logger ?? new DebugLogger();
+            _logger = config.Logger ?? new NullLogger();
             _disposed = false;
             _intentionalDisconnect = false;
             _subscribedTopics = new ArrayList();
@@ -192,6 +194,9 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _clientCert,
                 _config.UseMqtt5,
                 _logger);
+
+            // Pre-allocate once to avoid closure allocation on every publish call.
+            _transportPublishDelegate = new DirectPublishAction(DoTransportPublish);
 
             _transport.MessageReceived += OnTransportMessageReceived;
             _transport.MessagePublished += OnTransportMessagePublished;
@@ -496,19 +501,10 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 // Use retry handler if configured
                 if (_publishRetryHandler != null)
                 {
-                    ushort msgId = 0;
-                    string topicCapture = topic;
-                    byte[] bytesCapture = payloadBytes;
-                    MqttQoSLevel qosCapture = qos;
-                    bool retainCapture = retain;
+                    ushort msgId;
 
-                    bool success = _publishRetryHandler.ExecuteWithRetry(
-                        () =>
-                        {
-                            msgId = _transport.Publish(topicCapture, bytesCapture, qosCapture, retainCapture);
-                            return true;
-                        },
-                        "Publish to " + topic);
+                    bool success = _publishRetryHandler.ExecutePublishWithRetry(
+                        _transportPublishDelegate, topic, payloadBytes, qos, retain, out msgId);
 
                     if (!success)
                     {
@@ -594,19 +590,10 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             {
                 if (_publishRetryHandler != null)
                 {
-                    ushort msgId = 0;
-                    string topicCapture = topic;
-                    byte[] bytesCapture = payload;
-                    MqttQoSLevel qosCapture = qos;
-                    bool retainCapture = retain;
+                    ushort msgId;
 
-                    _publishRetryHandler.ExecuteWithRetry(
-                        () =>
-                        {
-                            msgId = _transport.Publish(topicCapture, bytesCapture, qosCapture, retainCapture);
-                            return true;
-                        },
-                        "PublishRaw to " + topic);
+                    _publishRetryHandler.ExecutePublishWithRetry(
+                        _transportPublishDelegate, topic, payload, qos, retain, out msgId);
 
                     return msgId;
                 }
@@ -667,7 +654,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             string payload = Encoding.UTF8.GetString(rawPayload, 0, rawPayload.Length);
 
-            _logger.LogInfo("Message received on '" + topic + "': " + payload);
+            // Log topic and byte count only — avoid logging payload content which may be large or sensitive.
+            _logger.LogInfo("Message received on '" + topic + "' (" + rawPayload.Length + " bytes)");
 
             _healthReporter?.IncrementReceived();
 
@@ -787,26 +775,37 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 return;
             }
 
-            _logger.LogInfo($"Resubscribing to {_subscribedTopics.Count} topic(s)...");
+            int count = _subscribedTopics.Count;
+            _logger.LogInfo("Resubscribing to " + count + " topic(s)...");
 
-            for (int i = 0; i < _subscribedTopics.Count; i++)
+            // Build arrays and send a single batched SUBSCRIBE packet instead of N individual ones.
+            string[] topics = new string[count];
+            MqttQoSLevel[] qosLevels = new MqttQoSLevel[count];
+
+            for (int i = 0; i < count; i++)
             {
-                string topic = (string)_subscribedTopics[i];
-                MqttQoSLevel qos = (MqttQoSLevel)_subscribedQos[i];
-
-                try
-                {
-                    _transport.Subscribe(
-                        new string[] { topic },
-                        new MqttQoSLevel[] { qos });
-
-                    _logger.LogInfo($"Resubscribed to: {topic}");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Failed to resubscribe to '{topic}': {ex.Message}");
-                }
+                topics[i] = (string)_subscribedTopics[i];
+                qosLevels[i] = (MqttQoSLevel)_subscribedQos[i];
             }
+
+            try
+            {
+                _transport.Subscribe(topics, qosLevels);
+                _logger.LogInfo("Resubscribed to all topics.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError("Failed to resubscribe: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Named transport publish method. Pre-allocated as a delegate once at construction
+        /// time to avoid per-publish closure allocation on the embedded heap.
+        /// </summary>
+        private ushort DoTransportPublish(string topic, byte[] payload, MqttQoSLevel qos, bool retain)
+        {
+            return _transport.Publish(topic, payload, qos, retain);
         }
 
         private static void ValidateConfig(EventGridMqttConfig config)

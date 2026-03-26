@@ -86,7 +86,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
-        /// Stops the reconnection process.
+        /// Stops the reconnection process. Wakes the background thread immediately.
         /// </summary>
         internal void Stop()
         {
@@ -94,6 +94,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             {
                 _isRunning = false;
             }
+
+            _reconnectThread?.Interrupt();
         }
 
         /// <summary>
@@ -146,8 +148,15 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 _logger?.LogInfo("Reconnect attempt " + _currentAttempt + ", waiting " + currentDelay + "ms...");
 
-                // Wait before attempting
-                Thread.Sleep(currentDelay);
+                // Wait before attempting — interruptible so Stop() takes effect immediately
+                try
+                {
+                    Thread.Sleep(currentDelay);
+                }
+                catch (ThreadInterruptedException)
+                {
+                    return;
+                }
 
                 // Check again after sleep
                 lock (_lock)

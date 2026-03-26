@@ -345,6 +345,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 string propertyKey = null;
                 string propertyValue = null;
+                int capturedVersion;
 
                 lock (_stateLock)
                 {
@@ -398,12 +399,16 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     {
                         _desiredVersion++;
                     }
+
+                    // Capture inside the lock so the event fires with the correct version
+                    // even if another update arrives concurrently.
+                    capturedVersion = _desiredVersion;
                 }
 
-                _logger?.LogInfo("DeviceTwin: Desired state updated (v" + _desiredVersion + ")");
+                _logger?.LogInfo("DeviceTwin: Desired state updated (v" + capturedVersion + ")");
 
                 DesiredStateChanged?.Invoke(this, new DesiredStateChangedEventArgs(
-                    payload, propertyKey, propertyValue, _desiredVersion));
+                    payload, propertyKey, propertyValue, capturedVersion));
             }
             catch (Exception ex)
             {

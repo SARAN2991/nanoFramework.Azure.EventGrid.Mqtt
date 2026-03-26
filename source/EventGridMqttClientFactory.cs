@@ -20,10 +20,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
     /// // ... anywhere else in the application:
     /// var sameClient = EventGridMqttClientFactory.Instance;
     ///
-    /// // Named instances (advanced multi-broker scenarios):
-    /// EventGridMqttClientFactory.Register("broker1", config1);
-    /// EventGridMqttClientFactory.Register("broker2", config2);
-    /// var client1 = EventGridMqttClientFactory.Get("broker1");
+    /// // Replace singleton (e.g., after certificate rotation):
+    /// EventGridMqttClientFactory.Replace(newConfig);
     /// </code>
     /// </remarks>
     public static class EventGridMqttClientFactory

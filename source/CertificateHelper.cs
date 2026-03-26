@@ -82,6 +82,38 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
+        /// Validates that only the client certificate and private key strings are present and
+        /// properly formatted. Use this when rotating client identity credentials without
+        /// changing the CA certificate.
+        /// Does not attempt to parse the certificates.
+        /// </summary>
+        /// <param name="clientCertPem">PEM-encoded client certificate.</param>
+        /// <param name="clientKeyPem">PEM-encoded client private key.</param>
+        /// <returns>True if both strings appear valid, false otherwise.</returns>
+        public static bool ValidateClientCertificateStrings(string clientCertPem, string clientKeyPem)
+        {
+            if (clientCertPem == null || clientCertPem.Length == 0)
+            {
+                return false;
+            }
+
+            if (clientKeyPem == null || clientKeyPem.Length == 0)
+            {
+                return false;
+            }
+
+            if (clientCertPem.IndexOf(CertBeginMarker) < 0 || clientCertPem.IndexOf(CertEndMarker) < 0)
+            {
+                return false;
+            }
+
+            bool hasRsaKey = clientKeyPem.IndexOf(RsaKeyBeginMarker) >= 0;
+            bool hasPkcs8Key = clientKeyPem.IndexOf(Pkcs8KeyBeginMarker) >= 0;
+
+            return hasRsaKey || hasPkcs8Key;
+        }
+
+        /// <summary>
         /// Validates that the required certificate strings are present and properly formatted.
         /// Does not attempt to parse the certificates.
         /// </summary>

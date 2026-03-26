@@ -221,9 +221,10 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         // ───── Logging ─────
 
         /// <summary>
-        /// Logger instance for library diagnostic output. Default is <see cref="DebugLogger"/>.
-        /// Set to <see cref="NullLogger"/> to suppress all output, or provide a custom <see cref="ILogger"/> implementation.
+        /// Logger instance for library diagnostic output.
+        /// Default is <see cref="NullLogger"/> (no output) for production use.
+        /// Set to <see cref="DebugLogger"/> during development, or provide a custom <see cref="ILogger"/> implementation.
         /// </summary>
-        public ILogger Logger { get; set; } = new DebugLogger();
+        public ILogger Logger { get; set; } = new NullLogger();
     }
 }

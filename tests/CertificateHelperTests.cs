@@ -22,6 +22,64 @@ namespace nanoFramework.Azure.EventGrid.Mqtt.Tests
         private const string ValidPkcs8Key =
             "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----";
 
+        // ───── ValidateClientCertificateStrings ─────
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_ValidCertAndRsaKey_ReturnsTrue()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings(ValidClientCert, ValidRsaKey);
+            Assert.IsTrue(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_ValidCertAndPkcs8Key_ReturnsTrue()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings(ValidClientCert, ValidPkcs8Key);
+            Assert.IsTrue(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_NullClientCert_ReturnsFalse()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings(null, ValidRsaKey);
+            Assert.IsFalse(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_EmptyClientCert_ReturnsFalse()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings("", ValidRsaKey);
+            Assert.IsFalse(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_NullKey_ReturnsFalse()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings(ValidClientCert, null);
+            Assert.IsFalse(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_EmptyKey_ReturnsFalse()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings(ValidClientCert, "");
+            Assert.IsFalse(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_InvalidCertMarkers_ReturnsFalse()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings("just-cert-data", ValidRsaKey);
+            Assert.IsFalse(result);
+        }
+
+        [TestMethod]
+        public void ValidateClientCertificateStrings_InvalidKeyFormat_ReturnsFalse()
+        {
+            bool result = CertificateHelper.ValidateClientCertificateStrings(ValidClientCert, "not-a-key");
+            Assert.IsFalse(result);
+        }
+
         // ───── ValidateCertificateStrings ─────
 
         [TestMethod]

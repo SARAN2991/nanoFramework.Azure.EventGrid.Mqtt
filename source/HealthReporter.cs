@@ -70,7 +70,11 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private readonly DateTime _startTime;
         private int _sequenceNumber;
 
-        // Counters
+        // Pre-allocated hashtable reused across BuildHealthReport() calls to reduce GC pressure.
+        // Only accessed from the single background report thread or direct BuildHealthReport() calls.
+        private readonly Hashtable _healthData;
+
+        // Counters — incremented from multiple threads; use Interlocked for correctness.
         private int _publishedCount;
         private int _receivedCount;
         private int _connectionDropCount;
@@ -162,6 +166,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _isRunning = false;
             _disposed = false;
             _logger = logger;
+            _healthData = new Hashtable();
         }
 
         /// <summary>
@@ -186,22 +191,23 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 freeMemory = -1;
             }
 
-            var healthData = new Hashtable();
-            healthData["deviceId"] = _deviceId;
-            healthData["uptimeSeconds"] = UptimeSeconds;
-            healthData["freeMemoryBytes"] = freeMemory;
-            healthData["publishedMessages"] = _publishedCount;
-            healthData["receivedMessages"] = _receivedCount;
-            healthData["connectionDrops"] = _connectionDropCount;
-            healthData["reconnections"] = _reconnectionCount;
-            healthData["isConnected"] = _isConnected;
-            healthData["sequenceNumber"] = _sequenceNumber;
-            healthData["timestamp"] = DateTime.UtcNow.ToString("o");
+            // Reuse pre-allocated hashtable to avoid per-report heap allocation.
+            _healthData.Clear();
+            _healthData["deviceId"] = _deviceId;
+            _healthData["uptimeSeconds"] = UptimeSeconds;
+            _healthData["freeMemoryBytes"] = freeMemory;
+            _healthData["publishedMessages"] = _publishedCount;
+            _healthData["receivedMessages"] = _receivedCount;
+            _healthData["connectionDrops"] = _connectionDropCount;
+            _healthData["reconnections"] = _reconnectionCount;
+            _healthData["isConnected"] = _isConnected;
+            _healthData["sequenceNumber"] = _sequenceNumber;
+            _healthData["timestamp"] = DateTime.UtcNow.ToString("o");
 
             // Allow application to add custom metrics
-            HealthReportPublishing?.Invoke(this, new HealthReportEventArgs(healthData, _sequenceNumber));
+            HealthReportPublishing?.Invoke(this, new HealthReportEventArgs(_healthData, _sequenceNumber));
 
-            return JsonConvert.SerializeObject(healthData);
+            return JsonConvert.SerializeObject(_healthData);
         }
 
         /// <summary>
@@ -240,46 +246,46 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
-        /// Stops the background health reporting thread.
+        /// Stops the background health reporting thread. Wakes the thread immediately.
         /// </summary>
         public void Stop()
         {
             _isRunning = false;
-
+            _reportThread?.Interrupt();
             _logger?.LogInfo("Health Reporter stopped.");
         }
 
         /// <summary>
-        /// Increments the published message counter. Call this when a message is published.
+        /// Increments the published message counter. Thread-safe.
         /// </summary>
         public void IncrementPublished()
         {
-            _publishedCount++;
+            Interlocked.Increment(ref _publishedCount);
         }
 
         /// <summary>
-        /// Increments the received message counter. Call this when a message is received.
+        /// Increments the received message counter. Thread-safe.
         /// </summary>
         public void IncrementReceived()
         {
-            _receivedCount++;
+            Interlocked.Increment(ref _receivedCount);
         }
 
         /// <summary>
-        /// Records a connection drop event.
+        /// Records a connection drop event. Thread-safe.
         /// </summary>
         public void RecordConnectionDrop()
         {
-            _connectionDropCount++;
+            Interlocked.Increment(ref _connectionDropCount);
             _isConnected = false;
         }
 
         /// <summary>
-        /// Records a successful reconnection.
+        /// Records a successful reconnection. Thread-safe.
         /// </summary>
         public void RecordReconnection()
         {
-            _reconnectionCount++;
+            Interlocked.Increment(ref _reconnectionCount);
             _isConnected = true;
         }
 
@@ -315,12 +321,19 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 try
                 {
                     Thread.Sleep(_intervalMs);
+                }
+                catch (ThreadInterruptedException)
+                {
+                    return;
+                }
 
-                    if (!_isRunning || _disposed)
-                    {
-                        break;
-                    }
+                if (!_isRunning || _disposed)
+                {
+                    break;
+                }
 
+                try
+                {
                     if (!_isConnected)
                     {
                         _logger?.LogInfo("Health: skipping report — not connected.");
