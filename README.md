@@ -2,7 +2,7 @@
 
 [![NuGet](https://img.shields.io/nuget/vpre/nanoFramework.Azure.EventGrid.Mqtt.svg)](https://www.nuget.org/packages/nanoFramework.Azure.EventGrid.Mqtt/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.md)
-[![Build](https://img.shields.io/github/actions/workflow/status/nanoframework/nanoFramework.Azure.EventGrid.Mqtt/build.yml?branch=main)](https://github.com/nanoframework/nanoFramework.Azure.EventGrid.Mqtt/actions)
+[![Build](https://img.shields.io/github/actions/workflow/status/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/build.yml?branch=main)](https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/actions)
 
 A production-ready MQTT client library for **.NET nanoFramework** that simplifies connecting embedded devices (ESP32) to the **Azure Event Grid Namespace MQTT broker**. Reduces connection boilerplate from ~150 lines to ~15 lines.
 

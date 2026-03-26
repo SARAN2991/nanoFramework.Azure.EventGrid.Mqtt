@@ -5,14 +5,14 @@
     <version>$version$</version>
     <title>nanoFramework.Azure.EventGrid.Mqtt</title>
     <authors>.NET nanoFramework Contributors</authors>
-    <owners>nanoframework</owners>
+    <owners>SARAN2991</owners>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <license type="file">LICENSE.md</license>
     <readme>docs\README.md</readme>
     <developmentDependency>false</developmentDependency>
     <icon>images\nf-logo.png</icon>
-    <projectUrl>https://github.com/nanoframework/nanoFramework.Azure.EventGrid.Mqtt</projectUrl>
-    <repository type="git" url="https://github.com/nanoframework/nanoFramework.Azure.EventGrid.Mqtt.git" commit="$commit$" />
+    <projectUrl>https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt</projectUrl>
+    <repository type="git" url="https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt.git" commit="$commit$" />
     <copyright>Copyright (c) .NET Foundation and Contributors</copyright>
     <description>
 A production-ready MQTT client library for .NET nanoFramework that simplifies connecting embedded devices (ESP32) to the Azure Event Grid Namespace MQTT broker.
