@@ -61,10 +61,13 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// necessary cryptographic material.
         /// </para>
         /// <para>
-        /// <b>Production recommendation:</b> Prefer <see cref="ClientCertificate"/> loaded from the
-        /// nanoFramework Certificate Store so no PEM string ever appears in source code or firmware binary.
-        /// Use <c>nanoff --certificate</c> or a first-boot provisioning wizard to write the certificate
-        /// to the device once, then retrieve it at runtime via <see cref="X509Store"/>.
+        /// <b>Production recommendation:</b> Use <see cref="ClientCertificate"/> (an
+        /// <see cref="System.Security.Cryptography.X509Certificates.X509Certificate2"/> that bundles
+        /// both the public certificate and the private key) loaded from the nanoFramework Certificate Store.
+        /// That way neither this property nor <see cref="ClientCertificatePem"/> needs to be set:
+        /// no PEM string ever appears in source code or the compiled firmware binary.
+        /// Provision the key once via <c>nanoff --certificate</c> or a first-boot wizard, then retrieve
+        /// it at runtime via <see cref="X509Store"/>.
         /// </para>
         /// </summary>
         public string ClientPrivateKeyPem { get; set; }
