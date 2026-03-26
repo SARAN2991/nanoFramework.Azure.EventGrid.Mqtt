@@ -72,6 +72,13 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private readonly ArrayList _subscribedTopics;
         private readonly ArrayList _subscribedQos;
         private readonly ArrayList _messageHandlers;
+        // Guards _subscribedTopics and _subscribedQos against concurrent access from the
+        // calling thread (Subscribe/Unsubscribe/Dispose) and the reconnect thread (ResubscribeAll).
+        private readonly object _topicsLock = new object();
+        // Guards _messageHandlers against concurrent access from the calling thread
+        // (RegisterMessageHandler/AutoSubscribeFeatureTopics) and M2Mqtt's receive thread
+        // (OnTransportMessageReceived dispatch loop).
+        private readonly object _handlersLock = new object();
         private bool _disposed;
         private bool _intentionalDisconnect;
         private ConnectionState _state;
@@ -270,6 +277,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _messageHandlers.Add(_certRotationManager);
                 _logger.LogInfo("Certificate Rotation enabled.");
             }
+
+            // Clear PEM strings from config now that all X509 objects have been constructed.
+            // The parsed certificate objects hold all necessary cryptographic material.
+            // Keeping the raw PEM strings on the managed heap is a security risk on
+            // devices without process isolation — a memory dump would expose the private key.
+            _config.CaCertificatePem = null;
+            _config.ClientCertificatePem = null;
+            _config.ClientPrivateKeyPem = null;
         }
 
         /// <summary>
@@ -401,11 +416,15 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 new string[] { topic },
                 new MqttQoSLevel[] { qos });
 
-            // Remember subscription for resubscribe on reconnect
-            if (!_subscribedTopics.Contains(topic))
+            // Remember subscription for resubscribe on reconnect.
+            // Lock guards against concurrent access from the reconnect thread (ResubscribeAll).
+            lock (_topicsLock)
             {
-                _subscribedTopics.Add(topic);
-                _subscribedQos.Add(qos);
+                if (!_subscribedTopics.Contains(topic))
+                {
+                    _subscribedTopics.Add(topic);
+                    _subscribedQos.Add(qos);
+                }
             }
         }
 
@@ -427,12 +446,15 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _transport.Unsubscribe(new string[] { topic });
             }
 
-            int index = _subscribedTopics.IndexOf(topic);
-
-            if (index >= 0)
+            lock (_topicsLock)
             {
-                _subscribedTopics.RemoveAt(index);
-                _subscribedQos.RemoveAt(index);
+                int index = _subscribedTopics.IndexOf(topic);
+
+                if (index >= 0)
+                {
+                    _subscribedTopics.RemoveAt(index);
+                    _subscribedQos.RemoveAt(index);
+                }
             }
 
             _logger.LogInfo($"Unsubscribed from: {topic}");
@@ -644,8 +666,17 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
 
             _offlineQueue?.Clear();
-            _subscribedTopics.Clear();
-            _subscribedQos.Clear();
+
+            lock (_topicsLock)
+            {
+                _subscribedTopics.Clear();
+                _subscribedQos.Clear();
+            }
+
+            lock (_handlersLock)
+            {
+                _messageHandlers.Clear();
+            }
         }
 
         #region Private Methods
@@ -659,12 +690,26 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             _healthReporter?.IncrementReceived();
 
-            // Route to feature managers first
-            for (int i = 0; i < _messageHandlers.Count; i++)
-            {
-                IMqttMessageHandler handler = (IMqttMessageHandler)_messageHandlers[i];
+            // Snapshot the handler list under the lock so that RegisterMessageHandler()
+            // can safely modify _messageHandlers from another thread without blocking
+            // or being blocked by message dispatch.
+            IMqttMessageHandler[] handlers;
 
-                if (handler.ProcessMessage(topic, payload))
+            lock (_handlersLock)
+            {
+                int count = _messageHandlers.Count;
+                handlers = new IMqttMessageHandler[count];
+
+                for (int i = 0; i < count; i++)
+                {
+                    handlers[i] = (IMqttMessageHandler)_messageHandlers[i];
+                }
+            }
+
+            // Route to feature managers first
+            for (int i = 0; i < handlers.Length; i++)
+            {
+                if (handlers[i].ProcessMessage(topic, payload))
                 {
                     break;
                 }
@@ -770,23 +815,32 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
         private void ResubscribeAll()
         {
-            if (_subscribedTopics.Count == 0)
+            string[] topics;
+            MqttQoSLevel[] qosLevels;
+            int count;
+
+            // Snapshot under lock so that Subscribe()/Unsubscribe() on the calling thread
+            // cannot mutate the lists while the reconnect thread is reading them.
+            lock (_topicsLock)
             {
-                return;
+                count = _subscribedTopics.Count;
+
+                if (count == 0)
+                {
+                    return;
+                }
+
+                topics = new string[count];
+                qosLevels = new MqttQoSLevel[count];
+
+                for (int i = 0; i < count; i++)
+                {
+                    topics[i] = (string)_subscribedTopics[i];
+                    qosLevels[i] = (MqttQoSLevel)_subscribedQos[i];
+                }
             }
 
-            int count = _subscribedTopics.Count;
             _logger.LogInfo("Resubscribing to " + count + " topic(s)...");
-
-            // Build arrays and send a single batched SUBSCRIBE packet instead of N individual ones.
-            string[] topics = new string[count];
-            MqttQoSLevel[] qosLevels = new MqttQoSLevel[count];
-
-            for (int i = 0; i < count; i++)
-            {
-                topics[i] = (string)_subscribedTopics[i];
-                qosLevels[i] = (MqttQoSLevel)_subscribedQos[i];
-            }
 
             try
             {
@@ -889,10 +943,25 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _logger.LogInfo("Subscribed to Certificate Rotation topics.");
             }
 
-            // Subscribe to any custom registered message handlers
-            for (int i = 0; i < _messageHandlers.Count; i++)
+            // Subscribe to any custom registered message handlers.
+            // Snapshot under lock so that RegisterMessageHandler() on another thread cannot
+            // mutate _messageHandlers while we iterate.
+            IMqttMessageHandler[] handlerSnapshot;
+
+            lock (_handlersLock)
             {
-                IMqttMessageHandler handler = (IMqttMessageHandler)_messageHandlers[i];
+                int c = _messageHandlers.Count;
+                handlerSnapshot = new IMqttMessageHandler[c];
+
+                for (int i = 0; i < c; i++)
+                {
+                    handlerSnapshot[i] = (IMqttMessageHandler)_messageHandlers[i];
+                }
+            }
+
+            for (int i = 0; i < handlerSnapshot.Length; i++)
+            {
+                IMqttMessageHandler handler = handlerSnapshot[i];
 
                 // Skip built-in handlers already subscribed above
                 if (handler == (IMqttMessageHandler)_twinManager ||
@@ -1082,12 +1151,23 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 throw new ArgumentNullException("handler");
             }
 
-            if (!_messageHandlers.Contains(handler))
+            bool added = false;
+
+            lock (_handlersLock)
             {
-                _messageHandlers.Add(handler);
+                if (!_messageHandlers.Contains(handler))
+                {
+                    _messageHandlers.Add(handler);
+                    added = true;
+                }
+            }
+
+            if (added)
+            {
                 _logger.LogInfo("Custom message handler registered.");
 
-                // If already connected, subscribe to the handler's topics now
+                // If already connected, subscribe to the handler's topics now.
+                // Done outside the lock to avoid holding _handlersLock during a transport call.
                 if (IsConnected)
                 {
                     string[] topics = handler.GetSubscriptionTopics();

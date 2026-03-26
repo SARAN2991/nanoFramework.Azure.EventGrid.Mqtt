@@ -29,18 +29,36 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <summary>
         /// The PEM-encoded CA/TLS root certificate for server validation (e.g., DigiCert Global Root G3).
         /// Must include the "-----BEGIN CERTIFICATE-----" and "-----END CERTIFICATE-----" markers.
+        /// <para>
+        /// <b>Security note:</b> This property is set to <c>null</c> by <see cref="EventGridMqttClient"/>
+        /// immediately after the X.509 certificate object is constructed from it, so the raw PEM
+        /// string is not retained on the managed heap for the lifetime of the client.
+        /// </para>
         /// </summary>
         public string CaCertificatePem { get; set; }
 
         /// <summary>
         /// The PEM-encoded public certificate for the device client.
         /// Must include the "-----BEGIN CERTIFICATE-----" and "-----END CERTIFICATE-----" markers.
+        /// <para>
+        /// <b>Security note:</b> This property is set to <c>null</c> by <see cref="EventGridMqttClient"/>
+        /// immediately after the X.509 certificate object is constructed from it, so the raw PEM
+        /// string is not retained on the managed heap for the lifetime of the client.
+        /// </para>
         /// </summary>
         public string ClientCertificatePem { get; set; }
 
         /// <summary>
         /// The PEM-encoded private key for the device client.
         /// Must include the "-----BEGIN RSA PRIVATE KEY-----" and "-----END RSA PRIVATE KEY-----" markers.
+        /// <para>
+        /// <b>Security note:</b> This property is set to <c>null</c> by <see cref="EventGridMqttClient"/>
+        /// immediately after the X.509 certificate object is constructed from it. On devices without
+        /// process-level memory isolation, retaining the raw private key PEM on the managed heap is a
+        /// security risk (heap dump via JTAG or OTA debug access would expose it). The parsed
+        /// <see cref="System.Security.Cryptography.X509Certificates.X509Certificate2"/> object holds all
+        /// necessary cryptographic material.
+        /// </para>
         /// </summary>
         public string ClientPrivateKeyPem { get; set; }
 
