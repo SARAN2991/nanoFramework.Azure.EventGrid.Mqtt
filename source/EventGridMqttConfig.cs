@@ -100,7 +100,11 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
         /// <summary>
         /// Whether to retain the LWT message. Default is false.
-        /// Note: EventGrid Namespace may not support retain flag.
+        /// <para>
+        /// <b>Important:</b> Azure Event Grid MQTT broker does NOT support retained messages.
+        /// Setting this to true will cause the broker to reject the connection.
+        /// This property is kept for forward compatibility but should always be false.
+        /// </para>
         /// </summary>
         public bool LwtRetain { get; set; } = false;
 

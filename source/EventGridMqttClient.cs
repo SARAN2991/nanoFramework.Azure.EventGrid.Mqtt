@@ -449,6 +449,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             ThrowIfDisposed();
 
+            // Azure Event Grid MQTT broker does not support retained messages.
+            // Silently force retain=false to prevent broker rejection.
+            if (retain)
+            {
+                _logger.LogWarning("Retain flag ignored — Azure Event Grid MQTT does not support retained messages.");
+                retain = false;
+            }
+
             if (topic == null || topic.Length == 0)
             {
                 throw new ArgumentException("Topic cannot be null or empty.");
@@ -548,6 +556,13 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         public ushort PublishRaw(string topic, byte[] payload, MqttQoSLevel qos = MqttQoSLevel.AtMostOnce, bool retain = false)
         {
             ThrowIfDisposed();
+
+            // Azure Event Grid MQTT broker does not support retained messages.
+            if (retain)
+            {
+                _logger.LogWarning("Retain flag ignored — Azure Event Grid MQTT does not support retained messages.");
+                retain = false;
+            }
 
             // Validate payload size for ESP32 memory safety
             if (_config.MaxPayloadSize > 0 && payload != null && payload.Length > _config.MaxPayloadSize)

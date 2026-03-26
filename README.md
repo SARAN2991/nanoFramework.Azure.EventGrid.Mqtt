@@ -563,6 +563,82 @@ using (var client = new EventGridMqttClient(config))
 }
 ```
 
+## Certificate Setup Guide
+
+Azure Event Grid MQTT broker requires **mutual TLS (mTLS)** with X.509 certificates. You need **three** PEM-encoded items:
+
+### 1. CA Root Certificate (Server Validation)
+
+The broker's TLS certificate is issued by **DigiCert Global G2** (as of 2024). Download the root CA:
+
+- **URL:** https://www.digicert.com/kb/digicert-root-certificates.htm
+- **File:** DigiCert Global Root G2 (`.pem` format)
+- **Purpose:** Your device uses this to validate the Event Grid broker's TLS identity
+
+```text
+// Store as a string constant in your firmware:
+string caCert = @"-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65T...
+-----END CERTIFICATE-----";
+```
+
+### 2. Client Certificate (Device Identity)
+
+A device-specific certificate registered with your Event Grid namespace. Generate with OpenSSL:
+
+```bash
+# Generate private key
+openssl genrsa -out device01.key 2048
+
+# Generate Certificate Signing Request
+openssl req -new -key device01.key -out device01.csr \
+  -subj "/CN=device01"
+
+# Self-sign (for dev/test) or submit CSR to your CA (for production)
+openssl x509 -req -in device01.csr -signkey device01.key \
+  -out device01.pem -days 365
+```
+
+### 3. Client Private Key
+
+The private key matching your client certificate (generated in step 2 above).
+
+### Register the Certificate in Azure
+
+```bash
+# Get the certificate thumbprint
+openssl x509 -in device01.pem -noout -fingerprint -sha256
+
+# Register in Event Grid Namespace (Azure CLI)
+az eventgrid namespace client create \
+  --resource-group <rg> \
+  --namespace-name <namespace> \
+  --client-name device01 \
+  --authentication "{thumbprintMatch:{primary:'<SHA256-THUMBPRINT>'}}"
+```
+
+### Using in Code
+
+```csharp
+// Load PEM strings (from constants, files, or secure storage)
+string caCert     = Resources.GetString(Resources.StringResources.CaCert);
+string clientCert = Resources.GetString(Resources.StringResources.ClientCert);
+string clientKey  = Resources.GetString(Resources.StringResources.ClientKey);
+
+// Validate before connecting
+bool valid = CertificateHelper.ValidateCertificateStrings(caCert, clientCert, clientKey);
+
+// Use with builder
+var client = new EventGridMqttClientBuilder()
+    .WithBroker("ns.westus2.ts.eventgrid.azure.net")
+    .WithDeviceId("device01")
+    .WithCertificates(caCert, clientCert, clientKey)
+    .Build();
+```
+
+> **Tip:** On ESP32, embed certificates as string resources or constants compiled into firmware.
+> Avoid loading from SD card or flash filesystem in production, as it adds latency and failure points.
+
 ## Topic Helpers
 
 ```csharp
