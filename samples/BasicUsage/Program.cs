@@ -25,20 +25,26 @@ namespace BasicUsage
         private const string BrokerHostname = "YOUR-NAMESPACE.westeurope-1.ts.eventgrid.azure.net";
         private const string DeviceId = "esp32-device-001";
 
-        // ───── Certificates (paste your PEM strings here) ─────
+        // ───── Certificates — development/prototyping only ─────────────────────
+        // Security note: the library zeroes these strings from the managed heap
+        // immediately after constructing the X.509 objects — they are not retained
+        // for the lifetime of the client. For production use, see CertificateStoreSample.
         private const string CaCertPem =
 @"-----BEGIN CERTIFICATE-----
-YOUR_DIGICERT_GLOBAL_G2_ROOT_CA_HERE
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+... (paste the full content of DigiCertGlobalRootG2.pem here) ...
 -----END CERTIFICATE-----";
 
         private const string ClientCertPem =
 @"-----BEGIN CERTIFICATE-----
-YOUR_CLIENT_CERTIFICATE_HERE
+MIICpDCCAYwCCQDU9pQpFnhMsTANBgkqhkiG9w0BAQsFADAUMRIwEAYDVQQDDAll
+... (paste the full content of device01.pem here) ...
 -----END CERTIFICATE-----";
 
         private const string ClientKeyPem =
 @"-----BEGIN RSA PRIVATE KEY-----
-YOUR_PRIVATE_KEY_HERE
+MIIEowIBAAKCAQEA2a2rwplBQLzygW5KrSMBcUKHQqfOBxklpR5SJdEEHSmfn59p
+... (paste the full content of device01.key here) ...
 -----END RSA PRIVATE KEY-----";
 
         // ───── Topics ─────
