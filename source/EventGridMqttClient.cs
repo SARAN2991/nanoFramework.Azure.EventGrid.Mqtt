@@ -654,7 +654,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             string payload = Encoding.UTF8.GetString(rawPayload, 0, rawPayload.Length);
 
-            // Log topic and byte count only — avoid logging payload content which may be large or sensitive.
+            // Log topic and byte count only -- payload content may be large or sensitive.
             _logger.LogInfo("Message received on '" + topic + "' (" + rawPayload.Length + " bytes)");
 
             _healthReporter?.IncrementReceived();

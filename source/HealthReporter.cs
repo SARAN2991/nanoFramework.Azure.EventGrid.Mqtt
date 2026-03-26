@@ -71,8 +71,10 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private int _sequenceNumber;
 
         // Pre-allocated hashtable reused across BuildHealthReport() calls to reduce GC pressure.
-        // Only accessed from the single background report thread or direct BuildHealthReport() calls.
+        // Access serialized by _buildLock so that direct calls to BuildHealthReport() are safe
+        // even if the background reporter thread is also active.
         private readonly Hashtable _healthData;
+        private readonly object _buildLock = new object();
 
         // Counters — incremented from multiple threads; use Interlocked for correctness.
         private int _publishedCount;
@@ -173,41 +175,52 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// Builds a health report JSON payload. Can be called manually
         /// without starting the background reporter.
         /// </summary>
+        /// <remarks>
+        /// This method is thread-safe; calls are serialized by an internal lock.
+        /// The <see cref="HealthReportEventArgs.HealthData"/> hashtable passed to
+        /// <see cref="HealthReportPublishing"/> handlers is the shared pre-allocated instance.
+        /// Handlers may add custom key-value pairs to it, but must not retain a reference
+        /// to it beyond the handler scope — it is cleared at the start of the next call.
+        /// </remarks>
         /// <returns>JSON string containing the health report.</returns>
         public string BuildHealthReport()
         {
-            _sequenceNumber++;
-
-            long freeMemory = 0;
-
-            try
+            lock (_buildLock)
             {
-                // nanoFramework.Runtime.Native.GC.Run(false) returns available memory
-                freeMemory = nanoFramework.Runtime.Native.GC.Run(false);
+                _sequenceNumber++;
+
+                long freeMemory = 0;
+
+                try
+                {
+                    // nanoFramework.Runtime.Native.GC.Run(false) returns available memory
+                    freeMemory = nanoFramework.Runtime.Native.GC.Run(false);
+                }
+                catch
+                {
+                    // GC.Run may not be available on all platforms
+                    freeMemory = -1;
+                }
+
+                // Reuse pre-allocated hashtable to avoid per-report heap allocation.
+                _healthData.Clear();
+                _healthData["deviceId"] = _deviceId;
+                _healthData["uptimeSeconds"] = UptimeSeconds;
+                _healthData["freeMemoryBytes"] = freeMemory;
+                _healthData["publishedMessages"] = _publishedCount;
+                _healthData["receivedMessages"] = _receivedCount;
+                _healthData["connectionDrops"] = _connectionDropCount;
+                _healthData["reconnections"] = _reconnectionCount;
+                _healthData["isConnected"] = _isConnected;
+                _healthData["sequenceNumber"] = _sequenceNumber;
+                _healthData["timestamp"] = DateTime.UtcNow.ToString("o");
+
+                // Allow application to add custom metrics.
+                // Handlers must not retain a reference to HealthData beyond this call.
+                HealthReportPublishing?.Invoke(this, new HealthReportEventArgs(_healthData, _sequenceNumber));
+
+                return JsonConvert.SerializeObject(_healthData);
             }
-            catch
-            {
-                // GC.Run may not be available on all platforms
-                freeMemory = -1;
-            }
-
-            // Reuse pre-allocated hashtable to avoid per-report heap allocation.
-            _healthData.Clear();
-            _healthData["deviceId"] = _deviceId;
-            _healthData["uptimeSeconds"] = UptimeSeconds;
-            _healthData["freeMemoryBytes"] = freeMemory;
-            _healthData["publishedMessages"] = _publishedCount;
-            _healthData["receivedMessages"] = _receivedCount;
-            _healthData["connectionDrops"] = _connectionDropCount;
-            _healthData["reconnections"] = _reconnectionCount;
-            _healthData["isConnected"] = _isConnected;
-            _healthData["sequenceNumber"] = _sequenceNumber;
-            _healthData["timestamp"] = DateTime.UtcNow.ToString("o");
-
-            // Allow application to add custom metrics
-            HealthReportPublishing?.Invoke(this, new HealthReportEventArgs(_healthData, _sequenceNumber));
-
-            return JsonConvert.SerializeObject(_healthData);
         }
 
         /// <summary>

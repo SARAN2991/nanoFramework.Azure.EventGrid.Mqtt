@@ -345,7 +345,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 string propertyKey = null;
                 string propertyValue = null;
-                int capturedVersion;
+                int capturedVersion = 0;
 
                 lock (_stateLock)
                 {
