@@ -651,27 +651,33 @@ namespace MyEventGridDevice
             }
         }
 
-        // ── Paste your certificate PEM strings below (from Step 4f) ─────────
+        // ── Certificate PEM strings (from Step 4f) ──────────────────────────
+        // Security note: the library zeroes these strings from the managed heap
+        // immediately after constructing the X.509 objects — they are not
+        // retained for the lifetime of the client.
 
         private const string CaCert =
 @"-----BEGIN CERTIFICATE-----
-PASTE_YOUR_DIGICERT_GLOBAL_ROOT_G2_PEM_HERE
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+... (paste the full content of DigiCertGlobalRootG2.pem here) ...
 -----END CERTIFICATE-----";
 
         private const string ClientCert =
 @"-----BEGIN CERTIFICATE-----
-PASTE_YOUR_DEVICE01_PEM_HERE
+MIICpDCCAYwCCQDU9pQpFnhMsTANBgkqhkiG9w0BAQsFADAUMRIwEAYDVQQDDAll
+... (paste the full content of device01.pem here) ...
 -----END CERTIFICATE-----";
 
         private const string ClientKey =
 @"-----BEGIN RSA PRIVATE KEY-----
-PASTE_YOUR_DEVICE01_KEY_HERE
+MIIEowIBAAKCAQEA2a2rwplBQLzygW5KrSMBcUKHQqfOBxklpR5SJdEEHSmfn59p
+... (paste the full content of device01.key here) ...
 -----END RSA PRIVATE KEY-----";
     }
 }
 ```
 
-Replace every `PASTE_YOUR_..._HERE` placeholder with the actual PEM content you copied in Step 4f.
+Replace the `... (paste the full content of ...)  ...` lines with the actual PEM content you copied in Step 4f. Include every line of the file, and keep the `-----BEGIN ...-----` and `-----END ...-----` header/footer lines exactly as shown.
 
 ---
 
