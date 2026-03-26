@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-preview] - 2026-03-26
+
+### Fixed
+- **Thread safety** — `_subscribedTopics`, `_subscribedQos`, and `_messageHandlers` are now
+  guarded by dedicated `_topicsLock` and `_handlersLock` fields. All reads and writes in
+  `Subscribe()`, `Unsubscribe()`, `ResubscribeAll()`, `RegisterMessageHandler()`,
+  `AutoSubscribeFeatureTopics()`, `OnTransportMessageReceived()`, and `Dispose()` are
+  now protected against concurrent access from the reconnect thread and the M2Mqtt receive
+  thread, eliminating a race condition that could cause corrupted state or
+  `IndexOutOfRangeException` on-device.
+- **PEM string security** — `EventGridMqttClient` now nulls `CaCertificatePem`,
+  `ClientCertificatePem`, and `ClientPrivateKeyPem` on the config object immediately after
+  the corresponding `X509Certificate`/`X509Certificate2` objects are constructed. This
+  prevents the raw private key PEM string from persisting on the managed heap for the
+  lifetime of the client, reducing exposure via JTAG or OTA memory-dump attacks on devices
+  without OS-level process isolation. XML-doc on the three config properties updated to
+  document this behaviour.
+
 ## [0.1.0-preview] - 2026-03-26
 
 ### Added
@@ -40,5 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sample projects: BasicUsage, MinimalSample, RetryAndResilience
 - Comprehensive README with certificate setup guide, API reference, and Azure setup instructions
 
-[Unreleased]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.1.0-preview...HEAD
+[Unreleased]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.2.0-preview...HEAD
+[0.2.0-preview]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.1.0-preview...v0.2.0-preview
 [0.1.0-preview]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/releases/tag/v0.1.0-preview
