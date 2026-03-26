@@ -73,6 +73,48 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
+        /// Sets pre-parsed X.509 certificates loaded from the nanoFramework Certificate Store.
+        /// This is the recommended approach for production firmware: certificates are provisioned
+        /// once to the device (via <c>nanoff --certificate</c> or a first-boot wizard) and
+        /// retrieved at runtime from <see cref="System.Security.Cryptography.X509Certificates.X509Store"/>.
+        /// No PEM string ever appears in source code or in the compiled firmware binary.
+        /// </summary>
+        /// <param name="caCert">
+        /// Pre-parsed CA/root certificate for server validation, retrieved from
+        /// <see cref="System.Security.Cryptography.X509Certificates.X509Store"/>.
+        /// </param>
+        /// <param name="clientCert">
+        /// Pre-parsed client certificate (including private key), retrieved from
+        /// <see cref="System.Security.Cryptography.X509Certificates.X509Store"/>.
+        /// </param>
+        /// <returns>This builder for method chaining.</returns>
+        /// <example>
+        /// <code>
+        /// // Provision once with: nanoff --target ESP32 --certificate ca.pem --certificate client.pfx
+        /// // Then at runtime:
+        /// var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+        /// store.Open(OpenFlags.ReadOnly);
+        /// var caCert     = store.Certificates[0];
+        /// var clientCert = (X509Certificate2)store.Certificates[1];
+        /// store.Close();
+        ///
+        /// var client = new EventGridMqttClientBuilder()
+        ///     .WithBroker("mynamespace.westeurope-1.ts.eventgrid.azure.net")
+        ///     .WithDevice("esp32-device-001")
+        ///     .WithCertificatesFromStore(caCert, clientCert)
+        ///     .Build();
+        /// </code>
+        /// </example>
+        public EventGridMqttClientBuilder WithCertificatesFromStore(
+            System.Security.Cryptography.X509Certificates.X509Certificate caCert,
+            System.Security.Cryptography.X509Certificates.X509Certificate2 clientCert)
+        {
+            _config.CaCertificate = caCert;
+            _config.ClientCertificate = clientCert;
+            return this;
+        }
+
+        /// <summary>
         /// Enables automatic reconnection with exponential backoff.
         /// </summary>
         /// <param name="initialDelayMs">Initial delay between reconnect attempts (ms). Default is 5000.</param>

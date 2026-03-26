@@ -185,13 +185,18 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 _logger.LogInfo("Publish retry enabled: " + _config.PublishMaxRetries + " max retries.");
             }
 
-            // Parse certificates
-            _logger.LogInfo("Parsing certificates...");
+            // Parse certificates — prefer pre-parsed objects (Certificate Store path) over PEM strings.
+            _logger.LogInfo("Initialising certificates...");
 
-            _caCert = CertificateHelper.CreateCaCertificate(_config.CaCertificatePem);
-            _clientCert = CertificateHelper.CreateClientCertificate(_config.ClientCertificatePem, _config.ClientPrivateKeyPem);
+            _caCert = config.CaCertificate != null
+                ? config.CaCertificate
+                : CertificateHelper.CreateCaCertificate(config.CaCertificatePem);
 
-            _logger.LogInfo("Certificates parsed successfully.");
+            _clientCert = config.ClientCertificate != null
+                ? config.ClientCertificate
+                : CertificateHelper.CreateClientCertificate(config.ClientCertificatePem, config.ClientPrivateKeyPem);
+
+            _logger.LogInfo("Certificates ready.");
 
             // Create the MQTT transport layer
             _transport = new M2MqttTransport(
@@ -881,19 +886,32 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 throw new ArgumentException("DeviceClientId is required. Must match the client authentication name in EventGrid.");
             }
 
-            if (config.CaCertificatePem == null || config.CaCertificatePem.Length == 0)
+            // Accept either a pre-parsed X509Certificate (Certificate Store path) or a PEM string.
+            bool hasCaCert = config.CaCertificate != null;
+            bool hasCaPem = config.CaCertificatePem != null && config.CaCertificatePem.Length > 0;
+            if (!hasCaCert && !hasCaPem)
             {
-                throw new ArgumentException("CaCertificatePem is required. Provide the TLS root certificate (e.g., DigiCert Global Root G3).");
+                throw new ArgumentException(
+                    "A CA certificate is required. Set CaCertificate (from the Certificate Store) " +
+                    "or CaCertificatePem (PEM string) — see EventGridMqttClientBuilder.WithCertificatesFromStore().");
             }
 
-            if (config.ClientCertificatePem == null || config.ClientCertificatePem.Length == 0)
+            // Accept either a pre-parsed X509Certificate2 (Certificate Store path) or PEM strings.
+            bool hasClientCert = config.ClientCertificate != null;
+            bool hasClientPem = (config.ClientCertificatePem != null && config.ClientCertificatePem.Length > 0) &&
+                                (config.ClientPrivateKeyPem != null && config.ClientPrivateKeyPem.Length > 0);
+            if (!hasClientCert && !hasClientPem)
             {
-                throw new ArgumentException("ClientCertificatePem is required. Provide the device public certificate.");
-            }
+                if (config.ClientCertificatePem == null || config.ClientCertificatePem.Length == 0)
+                {
+                    throw new ArgumentException(
+                        "A client certificate is required. Set ClientCertificate (from the Certificate Store) " +
+                        "or both ClientCertificatePem and ClientPrivateKeyPem (PEM strings).");
+                }
 
-            if (config.ClientPrivateKeyPem == null || config.ClientPrivateKeyPem.Length == 0)
-            {
-                throw new ArgumentException("ClientPrivateKeyPem is required. Provide the device private key.");
+                throw new ArgumentException(
+                    "ClientPrivateKeyPem is required when using PEM strings. " +
+                    "Alternatively, set ClientCertificate from the Certificate Store.");
             }
 
             if (config.Port <= 0 || config.Port > 65535)

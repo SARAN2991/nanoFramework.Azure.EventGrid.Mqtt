@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Security.Cryptography.X509Certificates;
 using nanoFramework.M2Mqtt.Messages;
 
 namespace nanoFramework.Azure.EventGrid.Mqtt
@@ -59,8 +60,53 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <see cref="System.Security.Cryptography.X509Certificates.X509Certificate2"/> object holds all
         /// necessary cryptographic material.
         /// </para>
+        /// <para>
+        /// <b>Production recommendation:</b> Use <see cref="ClientCertificate"/> (an
+        /// <see cref="System.Security.Cryptography.X509Certificates.X509Certificate2"/> that bundles
+        /// both the public certificate and the private key) loaded from the nanoFramework Certificate Store.
+        /// That way neither this property nor <see cref="ClientCertificatePem"/> needs to be set:
+        /// no PEM string ever appears in source code or the compiled firmware binary.
+        /// Provision the key once via <c>nanoff --certificate</c> or a first-boot wizard, then retrieve
+        /// it at runtime via <see cref="X509Store"/>.
+        /// </para>
         /// </summary>
         public string ClientPrivateKeyPem { get; set; }
+
+        // ───── Certificate Store (pre-parsed) ─────
+
+        /// <summary>
+        /// Pre-parsed CA/TLS root certificate loaded directly from the nanoFramework Certificate Store.
+        /// <para>
+        /// When set, takes precedence over <see cref="CaCertificatePem"/>. No PEM string is required
+        /// in source code or firmware binary. Retrieve using <see cref="X509Store"/> after provisioning
+        /// with <c>nanoff --certificate</c> or a first-boot provisioning flow.
+        /// </para>
+        /// <para>
+        /// <b>Example:</b><br/>
+        /// <c>var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);</c><br/>
+        /// <c>store.Open(OpenFlags.ReadOnly);</c><br/>
+        /// <c>config.CaCertificate = store.Certificates[caIndex];</c>
+        /// </para>
+        /// </summary>
+        public X509Certificate CaCertificate { get; set; }
+
+        /// <summary>
+        /// Pre-parsed client certificate (with private key) loaded directly from the nanoFramework Certificate Store.
+        /// <para>
+        /// When set, takes precedence over <see cref="ClientCertificatePem"/> and
+        /// <see cref="ClientPrivateKeyPem"/>. No PEM string is required in source code or firmware binary.
+        /// The private key is stored in the device's protected flash partition and is never exposed
+        /// as a string in the managed heap. Retrieve using <see cref="X509Store"/> after provisioning
+        /// with <c>nanoff --certificate</c> or a first-boot provisioning flow.
+        /// </para>
+        /// <para>
+        /// <b>Example:</b><br/>
+        /// <c>var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);</c><br/>
+        /// <c>store.Open(OpenFlags.ReadOnly);</c><br/>
+        /// <c>config.ClientCertificate = (X509Certificate2)store.Certificates[clientIndex];</c>
+        /// </para>
+        /// </summary>
+        public X509Certificate2 ClientCertificate { get; set; }
 
         /// <summary>
         /// Delay in milliseconds between reconnect attempts. Default is 5000ms.

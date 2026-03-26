@@ -12,7 +12,7 @@ A production-ready MQTT client library for **.NET nanoFramework** that simplifie
 |---|---|
 | **Core** | `Connect()`, `Publish()`, `Subscribe()`, `Disconnect()` — simple, developer-friendly API |
 | **Architecture** | `IMqttTransport` separates MQTT from Event Grid; `ConnectionState` state machine; `EventGridMqttClientFactory` singleton |
-| **Security** | X.509 certificate authentication with PEM string input; TLS 1.2; configurable auth |
+| **Security** | X.509 certificate authentication via PEM strings **or** nanoFramework Certificate Store (production-recommended); TLS 1.2; PEM strings zeroed from heap after use; CI secret scanning via gitleaks |
 | **Reliability** | Automatic reconnection with exponential backoff; publish retry with jitter; subscription persistence; offline message queue |
 | **Error Handling** | Structured `ErrorOccurred` event with `ErrorCategory`, recoverability flags, and context |
 | **Memory** | ESP32-optimized memory management; payload size limits; auto garbage collection; low-memory detection |
@@ -30,7 +30,7 @@ A production-ready MQTT client library for **.NET nanoFramework** that simplifie
 | **Hardware** | ESP32 or any nanoFramework-supported board with network connectivity |
 | **Firmware** | nanoFramework firmware flashed via [`nanoff`](https://github.com/nanoframework/nanoFirmwareFlasher) |
 | **Azure** | An [Event Grid Namespace](https://learn.microsoft.com/azure/event-grid/mqtt-overview) with MQTT broker enabled |
-| **Certificates** | CA root cert (e.g., DigiCert G2), device client certificate + private key |
+| **Certificates** | CA root cert (e.g., DigiCert G2) + device certificate/private key — either as PEM strings (development) or provisioned to the device Certificate Store (production) |
 | **IDE** | Visual Studio 2022 with the [nanoFramework Extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension) |
 
 ## Installation
@@ -45,7 +45,7 @@ Or add it via the NuGet Package Manager in your nanoFramework project.
 
 ## Quick Start
 
-### Using the Fluent Builder (Recommended)
+### Using the Fluent Builder — PEM Strings (development / prototyping)
 
 ```csharp
 using nanoFramework.Azure.EventGrid.Mqtt;
@@ -53,13 +53,44 @@ using nanoFramework.Azure.EventGrid.Mqtt;
 var client = new EventGridMqttClientBuilder()
     .WithBroker("my-namespace.westeurope-1.ts.eventgrid.azure.net")
     .WithDevice("esp32-device-001")
-    .WithCertificates(caCert, clientCert, clientKey)
+    .WithCertificates(caCert, clientCert, clientKey)   // PEM strings
     .WithAutoReconnect()
     .WithPublishRetry(maxRetries: 3)
     .WithOfflineQueue()
     .BuildAndConnect();
 
 client.ErrorOccurred += (s, e) => Debug.WriteLine($"Error [{e.Category}]: {e.Message}");
+
+client.Subscribe("devices/esp32-device-001/commands");
+client.PublishTelemetry(new { temp = 23.5, humidity = 65.0 });
+
+Thread.Sleep(Timeout.Infinite);
+```
+
+### Using the Fluent Builder — Certificate Store (production-recommended)
+
+Certificates are provisioned to the device **once** (at manufacturing or first boot) and retrieved
+at runtime from `X509Store`. No PEM string ever appears in source code or the compiled binary.
+
+```csharp
+using nanoFramework.Azure.EventGrid.Mqtt;
+using System.Security.Cryptography.X509Certificates;
+
+// Load certificates from the device Certificate Store (provisioned via nanoff or first-boot wizard)
+var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+store.Open(OpenFlags.ReadOnly);
+var caCert     = store.Certificates[0];
+var clientCert = (X509Certificate2)store.Certificates[1];
+store.Close();
+
+var client = new EventGridMqttClientBuilder()
+    .WithBroker("my-namespace.westeurope-1.ts.eventgrid.azure.net")
+    .WithDevice("esp32-device-001")
+    .WithCertificatesFromStore(caCert, clientCert)     // Certificate Store path
+    .WithAutoReconnect()
+    .WithPublishRetry(maxRetries: 3)
+    .WithOfflineQueue()
+    .BuildAndConnect();
 
 client.Subscribe("devices/esp32-device-001/commands");
 client.PublishTelemetry(new { temp = 23.5, humidity = 65.0 });
@@ -83,14 +114,25 @@ client.ConnectAndSubscribe("devices/my-device/commands", "devices/my-device/conf
 ```csharp
 using nanoFramework.Azure.EventGrid.Mqtt;
 
+// Option A: PEM strings (development/prototyping)
 var config = new EventGridMqttConfig
 {
     BrokerHostname = "my-namespace.westeurope-1.ts.eventgrid.azure.net",
     DeviceClientId = "esp32-device-001",
-    CaCertificatePem   = caCert,     // PEM string
+    CaCertificatePem   = caCert,       // PEM string
     ClientCertificatePem = clientCert, // PEM string
     ClientPrivateKeyPem  = clientKey,  // PEM string
     AutoReconnect = true,
+};
+
+// Option B: Certificate Store objects (production — no PEM strings in source)
+var config = new EventGridMqttConfig
+{
+    BrokerHostname   = "my-namespace.westeurope-1.ts.eventgrid.azure.net",
+    DeviceClientId   = "esp32-device-001",
+    CaCertificate    = caCertFromStore,     // X509Certificate from X509Store
+    ClientCertificate = clientCertFromStore, // X509Certificate2 from X509Store
+    AutoReconnect    = true,
 };
 
 using (var client = new EventGridMqttClient(config))
@@ -106,6 +148,823 @@ using (var client = new EventGridMqttClient(config))
     Thread.Sleep(Timeout.Infinite);
 }
 ```
+
+## ESP32 Setup Guide
+
+This section is written for **complete beginners**. Follow all six steps in order and you will have an ESP32 board publishing telemetry to Azure Event Grid over MQTT.
+
+---
+
+### Step 1 — Flash nanoFramework Firmware onto the ESP32
+
+nanoFramework is a tiny .NET runtime that runs on microcontrollers. You have to flash it onto your board before you can deploy any C# code to it.
+
+#### 1a — Install prerequisites
+
+| Prerequisite | What to do |
+|---|---|
+| **.NET SDK 8** (or newer) | Download and install from [https://dot.net](https://dot.net). Run `dotnet --version` in a terminal to verify. |
+| **USB driver for your board** | Most ESP32 boards use a CH340 or CP2102 USB-to-serial chip. Install the driver for your chip (search *"CH340 driver"* or *"CP2102 driver"* for your OS). |
+| **USB cable** | Use a **data** cable (not a charge-only cable). Plug the board into your PC. |
+
+#### 1b — Install the firmware flasher tool (nanoff)
+
+Open a terminal (Command Prompt / PowerShell / Terminal) and run:
+
+```bash
+dotnet tool install -g nanoff
+```
+
+Verify it installed correctly:
+
+```bash
+nanoff --version
+```
+
+#### 1c — Find your board's COM port
+
+**Windows:** Open **Device Manager → Ports (COM & LPT)**. Look for *USB Serial Device* or *CH340*. Note the port, e.g. `COM3`.
+
+**Linux / macOS:** Run:
+
+```bash
+nanoff --listports
+```
+
+The port is usually `/dev/ttyUSB0` (Linux) or `/dev/cu.usbserial-*` (macOS).
+
+#### 1d — Flash the firmware
+
+Replace `COM3` with your actual port:
+
+```bash
+nanoff --target ESP32_REV0 --serialport COM3 --update
+```
+
+You should see progress messages and a final `Device flashed successfully`. The board will reboot automatically.
+
+> **Which target should I use?**
+> | Board variant | Target name |
+> |---|---|
+> | Standard ESP32 | `ESP32_REV0` |
+> | ESP32-S3 | `ESP32_S3` |
+> | ESP32-C3 | `ESP32_C3` |
+> | ESP32-S2 | `ESP32_S2` |
+> | WROVER module | `ESP32_WROVER` |
+>
+> A full list is at the [nanoFirmwareFlasher releases page](https://github.com/nanoframework/nanoFirmwareFlasher/releases).
+
+---
+
+### Step 2 — Create a nanoFramework Project in Visual Studio
+
+#### 2a — Install Visual Studio 2022 and the nanoFramework extension
+
+1. Download **Visual Studio 2022 Community** (free) from [https://visualstudio.microsoft.com](https://visualstudio.microsoft.com).
+2. During installation, select the **.NET desktop development** workload.
+3. After installation, open Visual Studio and go to **Extensions → Manage Extensions**.
+4. Search for **nanoFramework** and install the [nanoFramework VS2022 Extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension).
+5. Restart Visual Studio when prompted.
+
+#### 2b — Create a new project
+
+1. Open Visual Studio 2022.
+2. Click **Create a new project**.
+3. In the search box, type `nanoFramework`.
+4. Select **nanoFramework Application** and click **Next**.
+5. Set **Project name** to e.g. `MyEventGridDevice` and choose a folder. Click **Create**.
+
+#### 2c — Set the target device
+
+1. In **Solution Explorer**, right-click the project → **Properties**.
+2. Click the **nanoFramework** tab on the left.
+3. Under **Target**, choose the same target you used when flashing (e.g. `ESP32_REV0`).
+4. Save and close the properties window.
+
+> The project already contains a `Program.cs` file with a `Main()` method — this is where all your code will go.
+
+---
+
+### Step 3 — Install the NuGet Package
+
+#### 3a — Via the Package Manager Console (quickest)
+
+Go to **Tools → NuGet Package Manager → Package Manager Console** and run:
+
+```powershell
+Install-Package nanoFramework.Azure.EventGrid.Mqtt -Version 0.1.0-preview
+```
+
+#### 3b — Via the GUI
+
+1. In **Solution Explorer**, right-click the project → **Manage NuGet Packages**.
+2. Click the **Browse** tab.
+3. In the search box type `nanoFramework.Azure.EventGrid.Mqtt`.
+4. Select the package in the list, choose version `0.1.0-preview`, and click **Install**.
+5. Accept the licence prompt.
+
+> **What gets installed?** The package automatically pulls in all required nanoFramework libraries: `nanoFramework.M2Mqtt` (MQTT transport), `nanoFramework.Json` (JSON serialisation), `nanoFramework.System.Net` (networking), and several others. You do not need to install them separately.
+
+---
+
+### Step 4 — Generate Certificates and Embed Them in Code
+
+Azure Event Grid requires every device to authenticate with **X.509 certificates**. You need three things:
+
+| What | Purpose |
+|---|---|
+| **CA root certificate** | Lets your ESP32 *verify* that it is really talking to Azure (downloaded, not generated) |
+| **Device certificate** | Tells Azure *who your ESP32 is* (you generate this) |
+| **Device private key** | The secret that proves ownership of the device certificate (you generate this) |
+
+#### 4a — Install OpenSSL
+
+OpenSSL is a command-line tool used to generate certificates.
+
+- **Windows:** Download the installer from [https://slproweb.com/products/Win32OpenSSL.html](https://slproweb.com/products/Win32OpenSSL.html). Install the *full* version (not Light). After installation, open a new Command Prompt and run `openssl version` to verify.
+- **macOS:** OpenSSL is usually pre-installed. Run `openssl version` in Terminal to check.
+- **Linux (Ubuntu/Debian):** Run `sudo apt install openssl`.
+
+#### 4b — Download the CA Root Certificate
+
+Your device needs the **DigiCert Global Root G2** certificate to verify the Azure Event Grid broker's identity.
+
+1. Open your browser and go to: [https://www.digicert.com/kb/digicert-root-certificates.htm](https://www.digicert.com/kb/digicert-root-certificates.htm)
+2. Find **DigiCert Global Root G2** and download the **PEM** file (it will be called something like `DigiCertGlobalRootG2.pem`).
+3. Open the downloaded file in any text editor (Notepad, VS Code, etc.). It looks like this:
+
+```
+-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+... (more base64 lines) ...
+-----END CERTIFICATE-----
+```
+
+4. Copy the **entire contents** of the file (including the `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----` lines). You will paste this into your code in step 4e.
+
+#### 4c — Generate a Device Private Key
+
+Open a terminal/command prompt, create a folder for your device certificates, and run:
+
+```bash
+mkdir my-device-certs
+cd my-device-certs
+
+# Generate a 2048-bit RSA private key
+openssl genrsa -out device01.key 2048
+```
+
+This creates a file called `device01.key`. **Keep this file private** — never share it or commit it to source control.
+
+#### 4d — Generate a Device Certificate
+
+First, create a Certificate Signing Request (CSR). The **CN** (Common Name) becomes the device client ID you register in Azure — keep it simple, no spaces.
+
+```bash
+# Create a Certificate Signing Request (CSR)
+openssl req -new -key device01.key -out device01.csr -subj "/CN=esp32-device-001"
+
+# Self-sign the certificate (valid for 365 days — use 730–1095 days for production)
+openssl x509 -req -in device01.csr -signkey device01.key -out device01.pem -days 365
+```
+
+You now have two important files:
+- `device01.pem` — the **device certificate** (public)
+- `device01.key` — the **device private key** (secret)
+
+Verify the certificate was created:
+
+```bash
+openssl x509 -in device01.pem -noout -text
+```
+
+You should see subject, validity dates, and other details.
+
+#### 4e — Register the Device in Azure
+
+You need an Azure subscription and the [Azure CLI](https://learn.microsoft.com/azure/cli/install) installed.
+
+**4e-i: Create an Event Grid Namespace** (skip if you already have one):
+
+```bash
+az login
+
+az eventgrid namespace create \
+  --name my-eg-namespace \
+  --resource-group my-rg \
+  --location westeurope \
+  --topic-spaces-configuration "{state:Enabled}"
+```
+
+**4e-ii: Get the certificate thumbprint**:
+
+```bash
+openssl x509 -in device01.pem -noout -fingerprint -sha256
+```
+
+This prints something like:
+```
+SHA256 Fingerprint=A1:B2:C3:D4:...:FF
+```
+
+Copy the value **after** `SHA256 Fingerprint=` and remove the colons: `A1B2C3D4...FF`.
+
+**4e-iii: Register the device**:
+
+```bash
+az eventgrid namespace client create \
+  --resource-group my-rg \
+  --namespace-name my-eg-namespace \
+  --client-name esp32-device-001 \
+  --authentication "{thumbprintMatch:{primary:'A1B2C3D4...FF'}}" \
+  --state Enabled
+```
+
+**4e-iv: Create a Topic Space and Permission Bindings** so the device is allowed to publish and subscribe:
+
+```bash
+# Create a topic space covering all device topics
+az eventgrid namespace topic-space create \
+  --name device-topics \
+  --namespace-name my-eg-namespace \
+  --resource-group my-rg \
+  --topic-templates "devices/+/telemetry" "devices/+/commands" "devices/+/status"
+
+# Allow all registered clients to publish
+az eventgrid namespace permission-binding create \
+  --name device-pub \
+  --namespace-name my-eg-namespace \
+  --resource-group my-rg \
+  --client-group-name '$all' \
+  --topic-space-name device-topics \
+  --permission publisher
+
+# Allow all registered clients to subscribe
+az eventgrid namespace permission-binding create \
+  --name device-sub \
+  --namespace-name my-eg-namespace \
+  --resource-group my-rg \
+  --client-group-name '$all' \
+  --topic-space-name device-topics \
+  --permission subscriber
+```
+
+**4e-v: Note your broker hostname**. In the Azure Portal, open your Event Grid Namespace → **Overview**. Copy the **MQTT hostname** — it looks like:
+```
+my-eg-namespace.westeurope-1.ts.eventgrid.azure.net
+```
+
+#### 4f — Embed the PEM Strings in Your C# Code (development only)
+
+> **Development and prototyping only.** Embedding PEM strings in source code means the private key
+> ends up in your Git history and in the compiled `.pe` binary. For any device that will leave your
+> desk, follow Step 4g instead to use the Certificate Store — no PEM string ever touches source code.
+
+Open your `device01.pem` and `device01.key` files in a text editor, then copy their full contents into `Program.cs` as `const string` constants.
+
+```csharp
+// ── CA Root Certificate (downloaded from DigiCert) ──────────────────────
+// Paste the ENTIRE content of DigiCertGlobalRootG2.pem here
+private const string CaCert =
+@"-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+... paste all lines from your .pem file here ...
+-----END CERTIFICATE-----";
+
+// ── Device Certificate (your device01.pem) ───────────────────────────────
+// Paste the ENTIRE content of device01.pem here
+private const string ClientCert =
+@"-----BEGIN CERTIFICATE-----
+MIICpDCCAYwCCQDU9pQpFnhMsTANBgkqhkiG9w0BAQsFADAUMRIwEAYDVQQDDAll
+... paste all lines from your device01.pem file here ...
+-----END CERTIFICATE-----";
+
+// ── Device Private Key (your device01.key) ───────────────────────────────
+// Paste the ENTIRE content of device01.key here
+private const string ClientKey =
+@"-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA2a2rwplBQLF29amygykEMmYz0+Kcj3bKBp29ByP9iFyFbENN
+... paste all lines from your device01.key file here ...
+-----END RSA PRIVATE KEY-----";
+```
+
+> **Important embedding rules:**
+> - Use a verbatim string literal `@"..."` so that the newlines inside the PEM are preserved.
+> - Include the `-----BEGIN ...-----` and `-----END ...-----` header/footer lines.
+> - Do **not** add extra spaces or wrap lines. Copy-paste the file content exactly.
+> - Do **not** commit private keys to public or shared repositories — see Step 4g for the production approach.
+
+---
+
+#### 4g — Provision Certificates to the Device Certificate Store (production)
+
+The **Certificate Store** is the recommended approach for any device leaving your desk. The private key is written into the device's protected flash partition **once** and retrieved at runtime. No PEM string ever appears in source code, in the compiled binary, or in Git history.
+
+**Why it matters:**
+
+| Method | Private key in `.pe` binary? | Private key in Git history? |
+|---|---|---|
+| `const string` PEM | **YES** | **YES** (if ever committed) |
+| Embedded Resource | **YES** (in `.pe`) | Depends on `.resx` commit |
+| Certificate Store | **NO** | **NO — never in source** |
+
+**Step 4g-i — Convert your PEM files to PFX format** (a single file containing both certificate and private key):
+
+```bash
+openssl pkcs12 -export \
+  -in device01.pem \
+  -inkey device01.key \
+  -out device01.pfx \
+  -passout pass:
+```
+
+This creates `device01.pfx` with an empty password.
+
+**Step 4g-ii — Provision certificates to the device using nanoff:**
+
+```bash
+# Provision the CA root certificate (index 0 in the store)
+nanoff --target ESP32_REV3 --certificate-store --file DigiCertGlobalRootG2.pem
+
+# Provision the device certificate + private key (index 1 in the store)
+nanoff --target ESP32_REV3 --certificate-store --file device01.pfx
+```
+
+The `--certificate-store` flag writes each certificate to the device's built-in Certificate Store backed by protected flash. It persists across firmware updates.
+
+> Add `--serialport COM5` (Windows) or `--serialport /dev/ttyUSB0` (Linux/macOS) if nanoff cannot auto-detect the port.
+
+> Each device must be provisioned individually with its own certificate/key pair. Never flash the same private key to two different devices — doing so removes the ability to independently revoke a single device.
+
+**Step 4g-iii — Retrieve certificates at runtime (no PEM strings in code):**
+
+```csharp
+using System.Security.Cryptography.X509Certificates;
+using nanoFramework.Azure.EventGrid.Mqtt;
+
+// Open the device Certificate Store — populated by nanoff in Step 4g-ii
+var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+store.Open(OpenFlags.ReadOnly);
+
+// Certificates appear in provisioning order
+// Index 0 = DigiCertGlobalRootG2 (CA cert, provisioned first)
+// Index 1 = device01.pfx (client cert + private key, provisioned second)
+var caCert     = store.Certificates[0];
+var clientCert = (X509Certificate2)store.Certificates[1];
+
+store.Close();
+
+// Connect — no PEM string anywhere in this code path
+using (var client = new EventGridMqttClientBuilder()
+    .WithBroker("my-eg-namespace.westeurope-1.ts.eventgrid.azure.net")
+    .WithDevice("esp32-device-001")
+    .WithCertificatesFromStore(caCert, clientCert)   // ← Certificate Store API
+    .WithAutoReconnect()
+    .WithPublishRetry(maxRetries: 3)
+    .BuildAndConnect())
+{
+    client.Subscribe("devices/esp32-device-001/commands");
+    // ... publish telemetry
+}
+```
+
+> **Tip:** In a real fleet, locate the correct certificate by its subject CN rather than a fixed index:
+> ```csharp
+> X509Certificate2 clientCert = null;
+> foreach (var cert in store.Certificates)
+> {
+>     if (cert.Subject.IndexOf("esp32-device-001") >= 0)
+>     {
+>         clientCert = (X509Certificate2)cert;
+>         break;
+>     }
+> }
+> ```
+
+---
+
+### Step 5 — Write the Application
+
+Choose **Option A** (PEM strings, development) or **Option B** (Certificate Store, production). Both achieve the same result — only the certificate loading differs.
+
+#### Option A: PEM strings (development — from Step 4f)
+
+Replace the contents of `Program.cs` with the following. Each line has a comment explaining what it does:
+
+```csharp
+using nanoFramework.Azure.EventGrid.Mqtt;
+using nanoFramework.Networking;
+using System.Diagnostics;
+using System.Threading;
+
+namespace MyEventGridDevice
+{
+    public class Program
+    {
+        // ── Azure Event Grid broker hostname (from Step 4e-v) ──
+        private const string BrokerHostname =
+            "my-eg-namespace.westeurope-1.ts.eventgrid.azure.net";
+
+        // ── Device client ID — must match the --client-name in Step 4e-iii ──
+        private const string DeviceId = "esp32-device-001";
+
+        // ── Wi-Fi credentials ──
+        // Note: for production devices, load credentials from secure storage
+        // rather than hardcoding them here.
+        private const string WifiSsid     = "YOUR_WIFI_SSID";
+        private const string WifiPassword = "YOUR_WIFI_PASSWORD";
+
+        public static void Main()
+        {
+            Debug.WriteLine("=== Starting up ===");
+
+            // ── 1. Connect to Wi-Fi ──────────────────────────────────────────
+            // WifiNetworkHelper.ConnectDhcp blocks until connected or the
+            // timeout fires.  requiresDateTime:true waits for the device clock
+            // to be set via NTP (required for TLS certificate validation).
+            // Increase WifiTimeoutMs to 60000 if NTP sync is slow on your network.
+            const int WifiTimeoutMs = 30000;
+            Debug.WriteLine("[WiFi] Connecting...");
+            bool wifiOk = WifiNetworkHelper.ConnectDhcp(
+                WifiSsid,
+                WifiPassword,
+                requiresDateTime: true,
+                token: new CancellationTokenSource(WifiTimeoutMs).Token);
+
+            if (!wifiOk)
+            {
+                Debug.WriteLine("[WiFi] Failed! Check SSID and password.");
+                Thread.Sleep(Timeout.Infinite); // halt
+                return;
+            }
+
+            Debug.WriteLine("[WiFi] Connected.");
+
+            // ── 2. Build the MQTT client ─────────────────────────────────────
+            // EventGridMqttClientBuilder uses a fluent (chain) API.
+            // Each .WithXxx() call configures one feature.
+            // BuildAndConnect() creates the client AND opens the TLS connection.
+            using (var client = new EventGridMqttClientBuilder()
+                .WithBroker(BrokerHostname)         // Azure endpoint
+                .WithDevice(DeviceId)               // device identity
+                .WithCertificates(CaCert, ClientCert, ClientKey) // mTLS auth (PEM strings)
+                .WithAutoReconnect()                // reconnect if Wi-Fi drops
+                .WithPublishRetry(maxRetries: 3)    // retry failed publishes
+                .BuildAndConnect())                 // connect now
+            {
+                Debug.WriteLine("[MQTT] Connected to Azure Event Grid.");
+
+                // ── 3. Subscribe to receive commands from the cloud ──────────
+                // Any message the cloud sends to this topic will fire the
+                // MessageReceived event below.
+                client.Subscribe("devices/" + DeviceId + "/commands");
+
+                // ── 4. Wire up an event handler for incoming messages ────────
+                client.MessageReceived += (sender, e) =>
+                {
+                    Debug.WriteLine("[Command] Topic:   " + e.Topic);
+                    Debug.WriteLine("[Command] Payload: " + e.Payload);
+                };
+
+                // ── 5. Publish telemetry every 10 seconds ────────────────────
+                // PublishTelemetry serialises the anonymous object to JSON and
+                // sends it to: devices/{DeviceId}/telemetry
+                int count = 0;
+                while (true)
+                {
+                    count++;
+                    client.PublishTelemetry(new
+                    {
+                        deviceId    = DeviceId,
+                        temperature = 23.5,
+                        humidity    = 60,
+                        messageNo   = count
+                    });
+                    Debug.WriteLine("[Telemetry] Sent message #" + count);
+
+                    Thread.Sleep(10000); // wait 10 seconds before next publish
+                }
+            }
+        }
+
+        // ── Paste your certificate PEM strings below (from Step 4f) ─────────
+
+        private const string CaCert =
+@"-----BEGIN CERTIFICATE-----
+PASTE_YOUR_DIGICERT_GLOBAL_ROOT_G2_PEM_HERE
+-----END CERTIFICATE-----";
+
+        private const string ClientCert =
+@"-----BEGIN CERTIFICATE-----
+PASTE_YOUR_DEVICE01_PEM_HERE
+-----END CERTIFICATE-----";
+
+        private const string ClientKey =
+@"-----BEGIN RSA PRIVATE KEY-----
+PASTE_YOUR_DEVICE01_KEY_HERE
+-----END RSA PRIVATE KEY-----";
+    }
+}
+```
+
+Replace every `PASTE_YOUR_..._HERE` placeholder with the actual PEM content you copied in Step 4f.
+
+---
+
+#### Option B: Certificate Store (production — from Step 4g)
+
+No PEM strings in source code. Certificates are loaded from the device's Certificate Store at runtime.
+
+```csharp
+using nanoFramework.Azure.EventGrid.Mqtt;
+using nanoFramework.Networking;
+using System.Diagnostics;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading;
+
+namespace MyEventGridDevice
+{
+    public class Program
+    {
+        private const string BrokerHostname =
+            "my-eg-namespace.westeurope-1.ts.eventgrid.azure.net";
+        private const string DeviceId   = "esp32-device-001";
+        private const string WifiSsid     = "YOUR_WIFI_SSID";
+        private const string WifiPassword = "YOUR_WIFI_PASSWORD";
+
+        public static void Main()
+        {
+            Debug.WriteLine("=== Starting up ===");
+
+            // ── 1. Load certificates from the device Certificate Store ───────
+            // Populated by: nanoff --certificate-store --file DigiCertGlobalRootG2.pem
+            //               nanoff --certificate-store --file device01.pfx
+            // (see Step 4g-ii — run once per device at manufacturing/first-boot)
+            var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+            store.Open(OpenFlags.ReadOnly);
+
+            if (store.Certificates == null || store.Certificates.Count < 2)
+            {
+                Debug.WriteLine("[Cert] Certificate Store is not provisioned. Run Step 4g-ii first.");
+                Thread.Sleep(Timeout.Infinite);
+                return;
+            }
+
+            var caCert     = store.Certificates[0];                   // DigiCertGlobalRootG2
+            var clientCert = (X509Certificate2)store.Certificates[1]; // device01 identity
+
+            store.Close();
+            Debug.WriteLine("[Cert] Certificates loaded from Certificate Store.");
+
+            // ── 2. Connect to Wi-Fi ──────────────────────────────────────────
+            bool wifiOk = WifiNetworkHelper.ConnectDhcp(
+                WifiSsid, WifiPassword,
+                requiresDateTime: true,
+                token: new CancellationTokenSource(30000).Token);
+
+            if (!wifiOk)
+            {
+                Debug.WriteLine("[WiFi] Failed! Check SSID and password.");
+                Thread.Sleep(Timeout.Infinite);
+                return;
+            }
+
+            Debug.WriteLine("[WiFi] Connected.");
+
+            // ── 3. Build the MQTT client — no PEM string anywhere ────────────
+            using (var client = new EventGridMqttClientBuilder()
+                .WithBroker(BrokerHostname)
+                .WithDevice(DeviceId)
+                .WithCertificatesFromStore(caCert, clientCert)  // ← Certificate Store API
+                .WithAutoReconnect()
+                .WithPublishRetry(maxRetries: 3)
+                .BuildAndConnect())
+            {
+                Debug.WriteLine("[MQTT] Connected to Azure Event Grid.");
+
+                client.Subscribe("devices/" + DeviceId + "/commands");
+                client.MessageReceived += (sender, e) =>
+                {
+                    Debug.WriteLine("[Command] Topic:   " + e.Topic);
+                    Debug.WriteLine("[Command] Payload: " + e.Payload);
+                };
+
+                int count = 0;
+                while (true)
+                {
+                    count++;
+                    client.PublishTelemetry(new
+                    {
+                        deviceId    = DeviceId,
+                        temperature = 23.5,
+                        humidity    = 60,
+                        messageNo   = count
+                    });
+                    Debug.WriteLine("[Telemetry] Sent message #" + count);
+                    Thread.Sleep(10000);
+                }
+            }
+        }
+    }
+}
+```
+
+### Step 6 — Deploy and Run
+
+#### 6a — Connect the board
+
+Plug your ESP32 into your PC with a USB data cable. Windows should show it in **Device Manager → Ports (COM & LPT)** as it did in Step 1c.
+
+#### 6b — Select the device in Visual Studio
+
+1. In Visual Studio, look at the toolbar at the top. There is a dropdown that shows **nanoFramework Device Explorer**.
+2. If the board is not listed, go to **View → Other Windows → nanoFramework Device Explorer** and click the refresh icon.
+3. Your device will appear as e.g. `ESP32_REV0 @ COM3`. Select it.
+
+#### 6c — Deploy the application
+
+Press **F5** (or **Debug → Start Debugging**). Visual Studio will:
+1. Build the project.
+2. Push the compiled assembly to the board over the COM port.
+3. Start execution automatically.
+
+The first deployment takes up to 30 seconds. Subsequent ones are faster.
+
+#### 6d — Watch the output
+
+Open **View → Output** and select **Debug** in the dropdown. You should see:
+
+**Option A (PEM strings):**
+```
+=== Starting up ===
+[WiFi] Connecting...
+[WiFi] Connected.
+[EventGridMqtt] Initialising certificates...
+[EventGridMqtt] Certificates ready.
+[EventGridMqtt] Connecting to my-eg-namespace.westeurope-1.ts.eventgrid.azure.net:8883 as 'esp32-device-001'...
+[EventGridMqtt] Connected successfully.
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[MQTT] Connected to Azure Event Grid.
+[Telemetry] Sent message #1
+[Telemetry] Sent message #2
+...
+```
+
+**Option B (Certificate Store):**
+```
+=== Starting up ===
+[Cert] Certificates loaded from Certificate Store.
+[WiFi] Connecting...
+[WiFi] Connected.
+[EventGridMqtt] Initialising certificates...
+[EventGridMqtt] Certificates ready.
+[EventGridMqtt] Connecting to my-eg-namespace.westeurope-1.ts.eventgrid.azure.net:8883 as 'esp32-device-001'...
+[EventGridMqtt] Connected successfully.
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[MQTT] Connected to Azure Event Grid.
+[Telemetry] Sent message #1
+...
+```
+
+#### 6e — Verify messages arrive in Azure
+
+Open the Azure Portal, navigate to your Event Grid Namespace, and use the **MQTT Messages** monitor or subscribe another client to confirm the telemetry is arriving.
+
+#### 6f — Common errors and fixes
+
+| Error message | Likely cause | Fix |
+|---|---|---|
+| `[WiFi] Failed!` | Wrong SSID/password, or board too far from router | Double-check `WifiSsid` and `WifiPassword` |
+| `[MQTT] Connection failed` | Certificates don't match what's registered in Azure | Re-run Step 4e-iii with the correct thumbprint |
+| `Connection failed: BadUserNameOrPassword` | Device client ID doesn't match `--client-name` in Azure | Make sure `DeviceId` equals `--client-name` |
+| `[EventGridMqtt] ERROR: Certificate ...` | PEM string has extra whitespace or missing lines (Option A only) | Re-copy the PEM file content; check `-----BEGIN`/`-----END` lines are present |
+| `[Cert] Certificate Store is not provisioned` | nanoff `--certificate-store` has not been run yet (Option B only) | Run Step 4g-ii and redeploy |
+| `store.Certificates.Count < 2` | Only one certificate provisioned (Option B) | Run nanoff `--certificate-store` for both the CA cert and the device PFX |
+| Output window is empty | `requiresDateTime:true` timed out (no NTP sync) | Set `WifiTimeoutMs` to `60000` (60 s). This can happen on networks with slow or firewalled NTP servers — the device must sync its clock before TLS certificates can be validated. |
+
+---
+
+## Debug Output Window
+
+When you run the application with the default `DebugLogger`, all library messages appear in Visual Studio's **Output** window under the **Debug** category. Below is a representative transcript for each lifecycle phase.
+
+### Startup and Connection
+
+```
+[EventGridMqtt] Initialising certificates...
+[EventGridMqtt] Certificates ready.
+[EventGridMqtt] Offline message queue enabled (max 20 messages).
+[EventGridMqtt] Device Twin enabled.
+[EventGridMqtt] Health Reporting enabled.
+[EventGridMqtt] Connecting to my-namespace.westeurope-1.ts.eventgrid.azure.net:8883 as 'esp32-device-001'...
+[EventGridMqtt] Connected successfully.
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[EventGridMqtt] Health Reporter started: every 30s on 'devices/esp32-device-001/health'
+```
+
+### Normal Operation (Telemetry Publishing)
+
+```
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[EventGridMqtt] Message received on 'devices/esp32-device-001/commands' (47 bytes)
+[EventGridMqtt] Health report #1 published.
+[EventGridMqtt] Health report #2 published.
+```
+
+### Retry on Publish Failure
+
+```
+[EventGridMqtt] WARN: Publish to 'devices/esp32-device-001/telemetry' failed: socket error
+[EventGridMqtt] Publish retry 1/3 for 'devices/esp32-device-001/telemetry' in 1342ms
+[EventGridMqtt] Publish to 'devices/esp32-device-001/telemetry' succeeded on retry 1
+```
+
+If all retries are exhausted:
+
+```
+[EventGridMqtt] WARN: Publish to 'devices/esp32-device-001/telemetry' failed: socket error
+[EventGridMqtt] Publish retry 1/3 for 'devices/esp32-device-001/telemetry' in 1342ms
+[EventGridMqtt] WARN: Publish retry 1 for 'devices/esp32-device-001/telemetry' failed: timeout
+[EventGridMqtt] Publish retry 2/3 for 'devices/esp32-device-001/telemetry' in 2891ms
+[EventGridMqtt] WARN: Publish retry 2 for 'devices/esp32-device-001/telemetry' failed: timeout
+[EventGridMqtt] Publish retry 3/3 for 'devices/esp32-device-001/telemetry' in 5217ms
+[EventGridMqtt] WARN: Publish retry 3 for 'devices/esp32-device-001/telemetry' failed: timeout
+[EventGridMqtt] ERROR: Publish to 'devices/esp32-device-001/telemetry' failed after 3 retries.
+```
+
+### Auto-Reconnect Sequence
+
+```
+[EventGridMqtt] Connection closed.
+[EventGridMqtt] Starting auto-reconnection...
+[EventGridMqtt] Reconnect attempt 1, waiting 5000ms...
+[EventGridMqtt] Reconnect attempt 1 failed.
+[EventGridMqtt] Reconnect attempt 2, waiting 10000ms...
+[EventGridMqtt] Reconnected successfully after 2 attempt(s).
+[EventGridMqtt] Resubscribing to 1 topic(s)...
+[EventGridMqtt] Resubscribed to all topics.
+```
+
+If max attempts are reached:
+
+```
+[EventGridMqtt] ERROR: Max reconnect attempts (5) reached.
+```
+
+### Certificate Monitoring
+
+```
+[EventGridMqtt] CertRotation: Monitoring started. Warning at 30 days before expiry.
+[EventGridMqtt] CertRotation: Certificate expires: 2026-06-01 (28 days remaining)
+[EventGridMqtt] WARN: Certificate expiring in 28 days!
+[EventGridMqtt] CertRotation: Received new certificate via MQTT.
+[EventGridMqtt] CertRotation: New certificate staged. Call ApplyPendingCertificate() to apply.
+[EventGridMqtt] Applying certificate rotation...
+[EventGridMqtt] Certificate rotation complete. Reconnected.
+```
+
+### Memory Pressure (ESP32)
+
+When free heap falls below the configured threshold, the library logs a GC warning:
+
+```
+[EventGridMqtt] WARN: Low memory detected (18432 bytes). Running GC.
+```
+
+### Suppressing Logs
+
+To silence all library output, pass a `NullLogger`:
+
+```csharp
+var client = new EventGridMqttClientBuilder()
+    ...
+    .WithSilentLogging()   // or .WithLogger(new NullLogger())
+    .BuildAndConnect();
+```
+
+### Custom Logger
+
+You can integrate with any logging framework by implementing `ILogger`:
+
+```csharp
+public class MyLogger : ILogger
+{
+    public void LogInfo(string message)    => MyApp.Log.Info(message);
+    public void LogWarning(string message) => MyApp.Log.Warn(message);
+    public void LogError(string message)   => MyApp.Log.Error(message);
+}
+
+var client = new EventGridMqttClientBuilder()
+    ...
+    .WithLogger(new MyLogger())
+    .BuildAndConnect();
+```
+
+---
 
 ## API Overview
 
@@ -155,12 +1014,20 @@ The main client class implements `IEventGridMqttClient` and `IDisposable`.
 ```csharp
 var config = new EventGridMqttConfig
 {
-    // Required
+    // Required — broker and device identity
     BrokerHostname      = "ns.region.ts.eventgrid.azure.net",
     DeviceClientId      = "my-device",
+
+    // Required — certificates: choose Option A or Option B (not both)
+
+    // Option A: PEM strings (development / prototyping)
     CaCertificatePem    = "-----BEGIN CERTIFICATE-----...",
     ClientCertificatePem = "-----BEGIN CERTIFICATE-----...",
     ClientPrivateKeyPem  = "-----BEGIN RSA PRIVATE KEY-----...",
+
+    // Option B: Certificate Store objects (production — no PEM in source)
+    // CaCertificate    = caCertFromStore,      // X509Certificate from X509Store
+    // ClientCertificate = clientCertFromStore, // X509Certificate2 from X509Store
 
     // Connection (optional)
     Port                   = 8883,          // default TLS port
@@ -232,7 +1099,8 @@ var client = new EventGridMqttClientBuilder()
 |---|---|
 | `WithBroker(hostname, port)` | Sets the MQTT broker endpoint |
 | `WithDevice(clientId)` | Sets the device client ID |
-| `WithCertificates(ca, cert, key)` | Sets all three PEM certificate strings |
+| `WithCertificates(ca, cert, key)` | Sets all three PEM certificate strings (development) |
+| `WithCertificatesFromStore(caCert, clientCert)` | Sets pre-parsed certificates from `X509Store` — **production-recommended**, no PEM in source |
 | `WithAutoReconnect(...)` | Enables auto-reconnect with backoff configuration |
 | `WithPublishRetry(...)` | Enables publish retry with exponential backoff |
 | `WithLastWill(topic, message)` | Sets LWT for offline detection |
@@ -565,7 +1433,7 @@ using (var client = new EventGridMqttClient(config))
 
 ## Certificate Setup Guide
 
-Azure Event Grid MQTT broker requires **mutual TLS (mTLS)** with X.509 certificates. You need **three** PEM-encoded items:
+Azure Event Grid MQTT broker requires **mutual TLS (mTLS)** with X.509 certificates. You need a CA root certificate for server validation and a per-device certificate + private key for client authentication.
 
 ### 1. CA Root Certificate (Server Validation)
 
@@ -575,16 +1443,9 @@ The broker's TLS certificate is issued by **DigiCert Global G2** (as of 2024). D
 - **File:** DigiCert Global Root G2 (`.pem` format)
 - **Purpose:** Your device uses this to validate the Event Grid broker's TLS identity
 
-```text
-// Store as a string constant in your firmware:
-string caCert = @"-----BEGIN CERTIFICATE-----
-MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65T...
------END CERTIFICATE-----";
-```
-
 ### 2. Client Certificate (Device Identity)
 
-A device-specific certificate registered with your Event Grid namespace. Generate with OpenSSL:
+A **per-device** certificate registered with your Event Grid namespace. Each device must have its own unique certificate so it can be independently revoked. Generate with OpenSSL:
 
 ```bash
 # Generate private key
@@ -617,7 +1478,7 @@ az eventgrid namespace client create \
   --authentication "{thumbprintMatch:{primary:'<SHA256-THUMBPRINT>'}}"
 ```
 
-### Using in Code
+### Using in Code — Development (PEM strings)
 
 ```csharp
 // Load PEM strings (from constants, files, or secure storage)
@@ -636,8 +1497,47 @@ var client = new EventGridMqttClientBuilder()
     .Build();
 ```
 
-> **Tip:** On ESP32, embed certificates as string resources or constants compiled into firmware.
-> Avoid loading from SD card or flash filesystem in production, as it adds latency and failure points.
+> **Development note:** Using string constants or embedded resources means the private key appears in the compiled `.pe` binary. This is acceptable during development but should not be used for production firmware.
+
+### Using in Code — Production (Certificate Store)
+
+For production firmware, provision certificates to the device's Certificate Store once and retrieve them at runtime. No PEM string ever appears in source code or the compiled binary.
+
+```bash
+# Step 1: Create a PFX file containing certificate + private key
+openssl pkcs12 -export -in device01.pem -inkey device01.key \
+  -out device01.pfx -passout pass:
+
+# Step 2: Provision to device Certificate Store (run once per device)
+nanoff --target ESP32_REV3 --certificate-store --file DigiCertGlobalRootG2.pem
+nanoff --target ESP32_REV3 --certificate-store --file device01.pfx
+```
+
+```csharp
+using System.Security.Cryptography.X509Certificates;
+
+// Retrieve at runtime — no PEM string needed
+var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
+store.Open(OpenFlags.ReadOnly);
+var caCert     = store.Certificates[0];
+var clientCert = (X509Certificate2)store.Certificates[1];
+store.Close();
+
+// Use WithCertificatesFromStore instead of WithCertificates
+var client = new EventGridMqttClientBuilder()
+    .WithBroker("ns.westus2.ts.eventgrid.azure.net")
+    .WithDevice("device01")
+    .WithCertificatesFromStore(caCert, clientCert)   // ← no PEM string
+    .Build();
+```
+
+> **Security summary:**
+>
+> | Method | Private key in firmware binary? | Private key ever in Git? |
+> |---|---|---|
+> | `const string` PEM | **YES** | YES if committed |
+> | Embedded Resource | **YES** (in `.pe`) | YES if `.resx` committed |
+> | **Certificate Store** | **NO** | **Never** |
 
 ## Topic Helpers
 
@@ -778,9 +1678,9 @@ source/
   IMqttTransport.cs              # Transport abstraction (MQTT separated from Event Grid)
   M2MqttTransport.cs             # Concrete IMqttTransport wrapping nanoFramework.M2Mqtt
   EventGridMqttClient.cs         # Main client (Event Grid semantics only)
-  EventGridMqttClientBuilder.cs  # Fluent builder for easy configuration
+  EventGridMqttClientBuilder.cs  # Fluent builder — WithCertificates() + WithCertificatesFromStore()
   EventGridMqttClientFactory.cs  # Singleton factory for ESP32 memory safety
-  EventGridMqttConfig.cs         # Configuration class
+  EventGridMqttConfig.cs         # Configuration — PEM properties + CaCertificate/ClientCertificate
   EventGridMqttEventArgs.cs      # Event argument types
   ClientErrorEventArgs.cs        # Structured error event args + ErrorCategory enum
   ConnectionState.cs             # Connection state machine enum
@@ -794,9 +1694,13 @@ source/
   HealthReporter.cs              # Periodic health heartbeat
   CertificateRotationManager.cs  # Certificate lifecycle management
 samples/
-  BasicUsage/                    # Complete sample — manual config
+  BasicUsage/                    # Complete sample — manual config (PEM strings)
   MinimalSample/                 # Minimal sample — fluent builder + one-liners
   RetryAndResilience/            # Full resilience demo — retry, memory, health
+  CertificateStoreSample/        # Production sample — Certificate Store, no PEM in source
+.github/workflows/
+  build.yml                      # CI: build, pack, publish NuGet
+  secret-scan.yml                # CI: gitleaks secret scanning on every push/PR
 ```
 
 ## Contributing

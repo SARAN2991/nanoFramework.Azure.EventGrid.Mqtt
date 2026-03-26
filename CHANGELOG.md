@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0-preview] - 2026-03-26
+
+### Added
+- **Certificate Store support** — `EventGridMqttConfig` gains two new properties:
+  - `CaCertificate` (`X509Certificate`) — pre-parsed CA/root certificate
+  - `ClientCertificate` (`X509Certificate2`) — pre-parsed client certificate with embedded private key
+
+  When either is set it takes precedence over the corresponding PEM string property.
+  Use these to load certificates directly from the nanoFramework `X509Store` so no PEM string
+  ever appears in source code or the compiled firmware binary.
+
+- **`EventGridMqttClientBuilder.WithCertificatesFromStore(X509Certificate, X509Certificate2)`** —
+  fluent method for the Certificate Store path.  Accepts pre-parsed objects retrieved from
+  `X509Store` at runtime.  Full XML doc and code example included.
+
+- **`CertificateStoreSample`** (`samples/CertificateStoreSample/`) — new end-to-end sample
+  demonstrating production-recommended certificate provisioning:
+  - Checks whether the device Certificate Store has been provisioned (halts with instructions if not)
+  - Loads certificates from `X509Store` at runtime
+  - Uses `WithCertificatesFromStore()` — no PEM string anywhere in the sample
+  - Includes `FirstBootProvisioner` helper and inline comparison table
+
+- **GitHub Actions secret scanning** (`.github/workflows/secret-scan.yml`) — `gitleaks/gitleaks-action@v2`
+  runs on every push and every PR across all branches. Detects accidentally committed PEM keys,
+  API tokens, and other credentials before they can be merged.
+
+### Changed
+- `EventGridMqttClient` constructor: certificate initialisation log message changed from
+  `"Parsing certificates..."` / `"Certificates parsed successfully."` to
+  `"Initialising certificates..."` / `"Certificates ready."` to reflect that pre-parsed
+  objects are now accepted without any parsing step.
+- `EventGridMqttClient.ValidateConfig`: updated to accept either PEM strings **or** pre-parsed
+  `X509Certificate`/`X509Certificate2` objects — both paths satisfy the certificate requirement.
+  Error messages updated to point to `WithCertificatesFromStore()` when neither is provided.
+- **README.md** — comprehensive documentation update:
+  - Features table: Security row updated to mention Certificate Store path and secret scanning
+  - Quick Start: added Certificate Store variant alongside PEM variant
+  - Step 4f renamed to "Embed PEM Strings (development only)" with prominent production warning
+  - New Step 4g: step-by-step Certificate Store provisioning via `nanoff --certificate-store`
+  - Step 5: now shows both Option A (PEM) and Option B (Certificate Store) application templates
+  - Step 6d: debug output updated; step 6f error table extended with Certificate Store errors
+  - Configuration Reference: `CaCertificate`/`ClientCertificate` documented alongside PEM properties
+  - Fluent Builder API table: `WithCertificatesFromStore()` row added
+  - Certificate Setup Guide: "Using in Code" split into Development and Production sub-sections
+  - Project Structure: `CertificateStoreSample` and `secret-scan.yml` added
+
 ## [0.2.0-preview] - 2026-03-26
 
 ### Fixed
@@ -58,6 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sample projects: BasicUsage, MinimalSample, RetryAndResilience
 - Comprehensive README with certificate setup guide, API reference, and Azure setup instructions
 
-[Unreleased]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.2.0-preview...HEAD
+[Unreleased]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.3.0-preview...HEAD
+[0.3.0-preview]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.2.0-preview...v0.3.0-preview
 [0.2.0-preview]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/compare/v0.1.0-preview...v0.2.0-preview
 [0.1.0-preview]: https://github.com/SARAN2991/nanoFramework.Azure.EventGrid.Mqtt/releases/tag/v0.1.0-preview
