@@ -107,6 +107,237 @@ using (var client = new EventGridMqttClient(config))
 }
 ```
 
+## ESP32 Setup Guide
+
+This section walks you through every step from a bare ESP32 board to a device publishing telemetry to Azure Event Grid.
+
+### Step 1 — Flash nanoFramework Firmware
+
+Install the nanoFramework firmware flasher tool and flash your board:
+
+```bash
+# Install nanoff (one-time)
+dotnet tool install -g nanoff
+
+# Flash ESP32 (replace COM3 with your port)
+nanoff --target ESP32_REV0 --serialport COM3 --update
+```
+
+> **Tip:** On Linux/macOS the port is typically `/dev/ttyUSB0`. Run `nanoff --listports` to find it.
+> For ESP32-S3 or other variants, replace `ESP32_REV0` with the correct target (e.g. `ESP32_S3`, `ESP32_C3`).
+> A full list of targets is at [nanoFirmwareFlasher releases](https://github.com/nanoframework/nanoFirmwareFlasher).
+
+### Step 2 — Create a nanoFramework Project in Visual Studio
+
+1. Install **Visual Studio 2022** and the [nanoFramework VS Extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension).
+2. Go to **File → New → Project** and search for **nanoFramework**.
+3. Select **nanoFramework Application** and click **Create**.
+4. In **Solution Explorer**, right-click the project → **Properties → nanoFramework** → confirm the target matches your board.
+
+### Step 3 — Install the NuGet Package
+
+In the **Package Manager Console**:
+
+```powershell
+Install-Package nanoFramework.Azure.EventGrid.Mqtt -Version 0.1.0-preview
+```
+
+Or via **Manage NuGet Packages → Browse**, search for `nanoFramework.Azure.EventGrid.Mqtt`, and install it.
+
+> The package pulls in all nanoFramework dependencies automatically (`nanoFramework.M2Mqtt`, `nanoFramework.Json`, etc.).
+
+### Step 4 — Prepare Certificates
+
+Embed your three PEM strings as `const string` values in `Program.cs` (see the [Certificate Setup Guide](#certificate-setup-guide) section below for how to generate and register them).
+
+```csharp
+private const string CaCert =
+@"-----BEGIN CERTIFICATE-----
+<DigiCert Global Root G2 PEM here>
+-----END CERTIFICATE-----";
+
+private const string ClientCert =
+@"-----BEGIN CERTIFICATE-----
+<Your device certificate PEM here>
+-----END CERTIFICATE-----";
+
+private const string ClientKey =
+@"-----BEGIN RSA PRIVATE KEY-----
+<Your device private key PEM here>
+-----END RSA PRIVATE KEY-----";
+```
+
+### Step 5 — Write the Application
+
+```csharp
+using nanoFramework.Azure.EventGrid.Mqtt;
+using nanoFramework.Networking;
+using System.Diagnostics;
+using System.Threading;
+
+public class Program
+{
+    public static void Main()
+    {
+        // Connect to Wi-Fi — blocks until connected or times out
+        if (!WifiNetworkHelper.ConnectDhcp("YOUR_SSID", "YOUR_PASSWORD",
+            requiresDateTime: true,
+            token: new CancellationTokenSource(30000).Token))
+        {
+            Debug.WriteLine("Wi-Fi failed!");
+            Thread.Sleep(Timeout.Infinite);
+            return;
+        }
+
+        // Build client, connect, and start publishing
+        using (var client = new EventGridMqttClientBuilder()
+            .WithBroker("YOUR-NAMESPACE.westeurope-1.ts.eventgrid.azure.net")
+            .WithDevice("esp32-device-001")
+            .WithCertificates(CaCert, ClientCert, ClientKey)
+            .WithAutoReconnect()
+            .BuildAndConnect())
+        {
+            client.Subscribe("devices/esp32-device-001/commands");
+
+            while (true)
+            {
+                client.PublishTelemetry(new { temperature = 23.5, humidity = 60 });
+                Thread.Sleep(10000);
+            }
+        }
+    }
+
+    // paste cert constants here ...
+}
+```
+
+### Step 6 — Deploy and Run
+
+1. Connect your ESP32 via USB.
+2. In Visual Studio, select **Debug → Start Debugging** (or press **F5**).
+3. The extension deploys the application to the board over the COM port.
+4. Open **View → Output** (select **Debug** in the dropdown) to see the device logs.
+
+---
+
+## Debug Output Window
+
+When you run the application with the default `DebugLogger`, all library messages appear in Visual Studio's **Output** window under the **Debug** category. Below is a representative transcript for each lifecycle phase.
+
+### Startup and Connection
+
+```
+[EventGridMqtt] Parsing certificates...
+[EventGridMqtt] Certificates parsed successfully.
+[EventGridMqtt] Offline message queue enabled (max 20 messages).
+[EventGridMqtt] Device Twin enabled.
+[EventGridMqtt] Health Reporting enabled.
+[EventGridMqtt] Connecting to my-namespace.westeurope-1.ts.eventgrid.azure.net:8883 as 'esp32-device-001'...
+[EventGridMqtt] Connected successfully.
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[EventGridMqtt] Health Reporter started: every 30s on 'devices/esp32-device-001/health'
+```
+
+### Normal Operation (Telemetry Publishing)
+
+```
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[EventGridMqtt] Message received on 'devices/esp32-device-001/commands' (47 bytes)
+[EventGridMqtt] Health report #1 published.
+[EventGridMqtt] Health report #2 published.
+```
+
+### Retry on Publish Failure
+
+```
+[EventGridMqtt] WARN: Publish to 'devices/esp32-device-001/telemetry' failed: socket error
+[EventGridMqtt] Publish retry 1/3 for 'devices/esp32-device-001/telemetry' in 1342ms
+[EventGridMqtt] Publish to 'devices/esp32-device-001/telemetry' succeeded on retry 1
+```
+
+If all retries are exhausted:
+
+```
+[EventGridMqtt] WARN: Publish to 'devices/esp32-device-001/telemetry' failed: socket error
+[EventGridMqtt] Publish retry 1/3 for 'devices/esp32-device-001/telemetry' in 1342ms
+[EventGridMqtt] WARN: Publish retry 1 for 'devices/esp32-device-001/telemetry' failed: timeout
+[EventGridMqtt] Publish retry 2/3 for 'devices/esp32-device-001/telemetry' in 2891ms
+[EventGridMqtt] WARN: Publish retry 2 for 'devices/esp32-device-001/telemetry' failed: timeout
+[EventGridMqtt] Publish retry 3/3 for 'devices/esp32-device-001/telemetry' in 5217ms
+[EventGridMqtt] WARN: Publish retry 3 for 'devices/esp32-device-001/telemetry' failed: timeout
+[EventGridMqtt] ERROR: Publish to 'devices/esp32-device-001/telemetry' failed after 3 retries.
+```
+
+### Auto-Reconnect Sequence
+
+```
+[EventGridMqtt] Connection closed.
+[EventGridMqtt] Starting auto-reconnection...
+[EventGridMqtt] Reconnect attempt 1, waiting 5000ms...
+[EventGridMqtt] Reconnect attempt 1 failed.
+[EventGridMqtt] Reconnect attempt 2, waiting 10000ms...
+[EventGridMqtt] Reconnected successfully after 2 attempt(s).
+[EventGridMqtt] Resubscribing to 1 topic(s)...
+[EventGridMqtt] Resubscribed to all topics.
+```
+
+If max attempts are reached:
+
+```
+[EventGridMqtt] ERROR: Max reconnect attempts (5) reached.
+```
+
+### Certificate Monitoring
+
+```
+[EventGridMqtt] CertRotation: Monitoring started. Warning at 30 days before expiry.
+[EventGridMqtt] CertRotation: Certificate expires: 2026-06-01 (28 days remaining)
+[EventGridMqtt] WARN: Certificate expiring in 28 days!
+[EventGridMqtt] CertRotation: Received new certificate via MQTT.
+[EventGridMqtt] CertRotation: New certificate staged. Call ApplyPendingCertificate() to apply.
+[EventGridMqtt] Applying certificate rotation...
+[EventGridMqtt] Certificate rotation complete. Reconnected.
+```
+
+### Memory Pressure (ESP32)
+
+When free heap falls below the configured threshold, the library logs a GC warning:
+
+```
+[EventGridMqtt] WARN: Low memory detected (18432 bytes). Running GC.
+```
+
+### Suppressing Logs
+
+To silence all library output, pass a `NullLogger`:
+
+```csharp
+var client = new EventGridMqttClientBuilder()
+    ...
+    .WithSilentLogging()   // or .WithLogger(new NullLogger())
+    .BuildAndConnect();
+```
+
+### Custom Logger
+
+You can integrate with any logging framework by implementing `ILogger`:
+
+```csharp
+public class MyLogger : ILogger
+{
+    public void LogInfo(string message)    => MyApp.Log.Info(message);
+    public void LogWarning(string message) => MyApp.Log.Warn(message);
+    public void LogError(string message)   => MyApp.Log.Error(message);
+}
+
+var client = new EventGridMqttClientBuilder()
+    ...
+    .WithLogger(new MyLogger())
+    .BuildAndConnect();
+```
+
+---
+
 ## API Overview
 
 ### EventGridMqttClient
