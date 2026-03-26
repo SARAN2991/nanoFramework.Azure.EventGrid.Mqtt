@@ -42,18 +42,24 @@
   <ItemGroup>
     <Compile Include="CertificateHelper.cs" />
     <Compile Include="CertificateRotationManager.cs" />
+    <Compile Include="ClientErrorEventArgs.cs" />
     <Compile Include="ConnectionManager.cs" />
+    <Compile Include="ConnectionState.cs" />
     <Compile Include="DeviceTwinManager.cs" />
     <Compile Include="EventGridMqttClient.cs" />
+    <Compile Include="EventGridMqttClientBuilder.cs" />
+    <Compile Include="EventGridMqttClientFactory.cs" />
     <Compile Include="EventGridMqttConfig.cs" />
     <Compile Include="EventGridMqttEventArgs.cs" />
     <Compile Include="HealthReporter.cs" />
     <Compile Include="IEventGridMqttClient.cs" />
     <Compile Include="ILogger.cs" />
     <Compile Include="IMqttMessageHandler.cs" />
+    <Compile Include="IMqttTransport.cs" />
+    <Compile Include="M2MqttTransport.cs" />
     <Compile Include="MemoryManager.cs" />
+    <Compile Include="OfflineMessageQueue.cs" />
     <Compile Include="RetryHandler.cs" />
-    <Compile Include="EventGridMqttClientBuilder.cs" />
     <Compile Include="TopicHelper.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

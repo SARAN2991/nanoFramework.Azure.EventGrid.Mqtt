@@ -11,8 +11,10 @@ A production-ready MQTT client library for **.NET nanoFramework** that simplifie
 | Category | Capabilities |
 |---|---|
 | **Core** | `Connect()`, `Publish()`, `Subscribe()`, `Disconnect()` — simple, developer-friendly API |
+| **Architecture** | `IMqttTransport` separates MQTT from Event Grid; `ConnectionState` state machine; `EventGridMqttClientFactory` singleton |
 | **Security** | X.509 certificate authentication with PEM string input; TLS 1.2; configurable auth |
-| **Reliability** | Automatic reconnection with exponential backoff; publish retry with jitter; subscription persistence across reconnects |
+| **Reliability** | Automatic reconnection with exponential backoff; publish retry with jitter; subscription persistence; offline message queue |
+| **Error Handling** | Structured `ErrorOccurred` event with `ErrorCategory`, recoverability flags, and context |
 | **Memory** | ESP32-optimized memory management; payload size limits; auto garbage collection; low-memory detection |
 | **Protocol** | MQTT v5.0 and v3.1.1; Last Will & Testament (LWT); JSON auto-serialization |
 | **Device Twin** | Desired/reported state synchronization over MQTT topics |
@@ -54,7 +56,10 @@ var client = new EventGridMqttClientBuilder()
     .WithCertificates(caCert, clientCert, clientKey)
     .WithAutoReconnect()
     .WithPublishRetry(maxRetries: 3)
+    .WithOfflineQueue()
     .BuildAndConnect();
+
+client.ErrorOccurred += (s, e) => Debug.WriteLine($"Error [{e.Category}]: {e.Message}");
 
 client.Subscribe("devices/esp32-device-001/commands");
 client.PublishTelemetry(new { temp = 23.5, humidity = 65.0 });
@@ -130,17 +135,20 @@ The main client class implements `IEventGridMqttClient` and `IDisposable`.
 |---|---|
 | `IsConnected` | Whether the client is connected. |
 | `IsReconnecting` | Whether reconnection is in progress. |
+| `State` | Current `ConnectionState` (Disconnected, Connecting, Connected, Reconnecting, Faulted). |
 | `DeviceClientId` | The MQTT client ID. |
 | `Twin` | `DeviceTwinManager` instance (null if disabled). |
 | `Health` | `HealthReporter` instance (null if disabled). |
 | `CertRotation` | `CertificateRotationManager` instance (null if disabled). |
 | `PublishRetry` | `RetryHandler` instance (null if retry not configured). |
+| `OfflineQueue` | `OfflineMessageQueue` instance (null if offline queue disabled). |
 
 | Event | Description |
 |---|---|
 | `MessageReceived` | Fired when a message arrives on a subscribed topic. |
 | `ConnectionStateChanged` | Fired on connect, disconnect, reconnect. |
 | `MessagePublished` | Fired when a QoS 1 publish is acknowledged. |
+| `ErrorOccurred` | Fired on any error with structured `ClientErrorEventArgs`. |
 
 ## Configuration Reference
 
@@ -187,6 +195,10 @@ var config = new EventGridMqttConfig
     PublishRetryBaseDelayMs = 1000,         // initial retry delay
     PublishRetryMaxDelayMs  = 30000,        // max retry delay
 
+    // Offline Message Queue (optional)
+    EnableOfflineQueue     = true,           // queue when disconnected (default)
+    MaxOfflineQueueSize    = 20,             // max queued messages
+
     // ESP32 Memory Management (optional)
     MaxPayloadSize     = 8192,              // 0 = no limit (default)
     AutoGarbageCollect = true,              // GC when memory is low
@@ -227,6 +239,8 @@ var client = new EventGridMqttClientBuilder()
 | `WithDeviceTwin(prefix)` | Enables device twin synchronization |
 | `WithHealthReporting(intervalMs)` | Enables periodic health heartbeat |
 | `WithCertificateRotation(...)` | Enables certificate lifecycle management |
+| `WithOfflineQueue(maxSize)` | Enables offline message queueing (default: 20 messages) |
+| `WithoutOfflineQueue()` | Disables offline queue — throws when publishing while disconnected |
 | `WithMaxPayloadSize(bytes)` | Sets max publish payload size (ESP32 memory safety) |
 | `WithLogger(logger)` / `WithSilentLogging()` | Configures logging |
 | `Build()` | Creates the client (does not connect) |
@@ -254,6 +268,123 @@ client.PublishRetry.ResetStatistics();
 ```
 
 **Backoff formula:** `delay = baseDelay * 2^(attempt-1) + jitter`, capped at `maxDelayMs`.
+
+## Connection State Machine
+
+The client uses a proper `ConnectionState` enum instead of loose boolean flags:
+
+```csharp
+// Check the current state
+if (client.State == ConnectionState.Connected)
+{
+    client.Publish("devices/esp32/data", payload);
+}
+
+// React to state changes
+client.ConnectionStateChanged += (s, e) =>
+{
+    Debug.WriteLine($"State: {client.State}");
+};
+```
+
+**State transitions:**
+| From | To | Trigger |
+|---|---|---|
+| `Disconnected` | `Connecting` | `Connect()` called |
+| `Connecting` | `Connected` | Connection success |
+| `Connecting` | `Faulted` | Connection failure |
+| `Connected` | `Disconnected` | `Disconnect()` called |
+| `Connected` | `Reconnecting` | Unexpected connection drop |
+| `Reconnecting` | `Connected` | Reconnect success |
+| `Reconnecting` | `Faulted` | Max attempts exhausted |
+| `Faulted` | `Connecting` | Manual `Connect()` retry |
+
+## Structured Error Handling
+
+The `ErrorOccurred` event provides structured error information for every failure:
+
+```csharp
+client.ErrorOccurred += (s, e) =>
+{
+    Debug.WriteLine($"[{e.Category}] {e.Message}");
+    Debug.WriteLine($"  Recoverable: {e.IsRecoverable}");
+    Debug.WriteLine($"  Context: {e.Context}");
+
+    if (e.Exception != null)
+    {
+        Debug.WriteLine($"  Exception: {e.Exception.Message}");
+    }
+};
+```
+
+**Error categories:** `Connection`, `Publish`, `Subscribe`, `Certificate`, `Network`, `Internal`
+
+## Offline Message Queue
+
+When the connection is lost, messages are queued instead of being dropped. They are automatically flushed on reconnect:
+
+```csharp
+var client = new EventGridMqttClientBuilder()
+    .WithBroker(hostname).WithDevice(deviceId)
+    .WithCertificates(ca, cert, key)
+    .WithAutoReconnect()
+    .WithOfflineQueue(maxSize: 30)  // default 20
+    .BuildAndConnect();
+
+// These will be queued if connection drops, then auto-sent on reconnect
+client.Publish("devices/esp32/telemetry", payload);
+
+// Monitor queue stats
+if (client.OfflineQueue != null)
+{
+    Debug.WriteLine($"Queued: {client.OfflineQueue.Count}");
+    Debug.WriteLine($"Dropped: {client.OfflineQueue.DroppedCount}");
+}
+```
+
+- FIFO eviction when full (oldest message dropped)
+- Configurable max size (default 20 messages)
+- Automatic flush on reconnect with per-message error handling
+
+## Singleton Factory
+
+On ESP32, only one TLS connection should exist to avoid memory exhaustion. Use `EventGridMqttClientFactory`:
+
+```csharp
+// Create once at startup
+var client = EventGridMqttClientFactory.GetOrCreate(config);
+
+// Access anywhere in the application
+var sameClient = EventGridMqttClientFactory.Instance;
+
+// Check if instance exists
+if (EventGridMqttClientFactory.HasInstance)
+{
+    EventGridMqttClientFactory.Instance.PublishTelemetry(data);
+}
+
+// Replace or destroy
+EventGridMqttClientFactory.Destroy();
+```
+
+## Transport Abstraction
+
+The MQTT transport is separated from Event Grid logic via `IMqttTransport`:
+
+```
+EventGridMqttClient (Event Grid semantics: topic routing, twins, health, certs)
+        │
+        ▼
+  IMqttTransport (abstract: connect, publish, subscribe)
+        │
+        ▼
+  M2MqttTransport (concrete: nanoFramework.M2Mqtt wrapper)
+```
+
+Benefits:
+- **Testability** — mock the transport for unit testing
+- **Swappability** — replace M2Mqtt without changing Event Grid logic
+- **Separation of concerns** — MQTT protocol isolated from business logic
 
 ## ESP32 Memory Management
 
@@ -505,18 +636,26 @@ az eventgrid namespace permission-binding create \
 
 ```
 ESP32 Device                              Azure Event Grid
-+-------------------------+               +------------------------+
-|  Your Application       |               |  Namespace             |
-|         |               |               |  +------------------+  |
-|  EventGridMqttClient    |--- MQTT 5 --->|  |  MQTT Broker     |  |
-|    +- CertificateHelper |    TLS 8883   |  |  +-----------+   |  |
-|    +- TopicHelper       |    X.509 Auth |  |  | Topic     |   |  |
-|    +- ConnectionManager |<-------------|  |  | Spaces    |   |  |
-|    +- DeviceTwinManager |               |  |  +-----------+   |  |
-|    +- HealthReporter    |               |  +------------------+  |
-|    +- CertRotationMgr   |               +------------------------+
-|    +- [Custom Handlers] |
-+-------------------------+
++-----------------------------+           +------------------------+
+|  Your Application           |           |  Namespace             |
+|         |                   |           |  +------------------+  |
+|  EventGridMqttClientFactory |           |  |  MQTT Broker     |  |
+|         |                   |           |  |  +-----------+   |  |
+|  EventGridMqttClient        |           |  |  | Topic     |   |  |
+|    (Event Grid semantics)   |           |  |  | Spaces    |   |  |
+|    +- ConnectionState       |           |  |  +-----------+   |  |
+|    +- OfflineMessageQueue   |           |  +------------------+  |
+|    +- ErrorOccurred event   |           +------------------------+
+|    +- DeviceTwinManager     |
+|    +- HealthReporter        |
+|    +- CertRotationMgr       |
+|    +- RetryHandler          |
+|    +- [Custom Handlers]     |
+|         |                   |
+|    IMqttTransport           |
+|         |                   |
+|    M2MqttTransport ---------|--- MQTT 5 / TLS 8883 / X.509 --->
++-----------------------------+
 ```
 
 ## Dependencies
@@ -559,12 +698,18 @@ source/
   IEventGridMqttClient.cs        # Client interface for DI/testing
   ILogger.cs                     # Logging abstraction + DebugLogger, NullLogger
   IMqttMessageHandler.cs         # Extensible message handler interface
-  EventGridMqttClient.cs         # Main client implementation
+  IMqttTransport.cs              # Transport abstraction (MQTT separated from Event Grid)
+  M2MqttTransport.cs             # Concrete IMqttTransport wrapping nanoFramework.M2Mqtt
+  EventGridMqttClient.cs         # Main client (Event Grid semantics only)
   EventGridMqttClientBuilder.cs  # Fluent builder for easy configuration
+  EventGridMqttClientFactory.cs  # Singleton factory for ESP32 memory safety
   EventGridMqttConfig.cs         # Configuration class
   EventGridMqttEventArgs.cs      # Event argument types
+  ClientErrorEventArgs.cs        # Structured error event args + ErrorCategory enum
+  ConnectionState.cs             # Connection state machine enum
   ConnectionManager.cs           # Auto-reconnect with exponential backoff
   RetryHandler.cs                # Publish retry with exponential backoff + jitter
+  OfflineMessageQueue.cs         # Bounded FIFO queue for disconnected scenarios
   MemoryManager.cs               # ESP32 memory management utilities
   CertificateHelper.cs           # X.509 certificate parsing from PEM
   TopicHelper.cs                 # Topic building and validation

@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections;
-using System.Diagnostics;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using nanoFramework.Json;
@@ -112,6 +111,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private readonly string _certNewTopic;
         private readonly string _certAckTopic;
         private readonly string _certStatusTopic;
+        private readonly ILogger _logger;
 
         private string _currentCertPem;
         private string _currentKeyPem;
@@ -205,13 +205,15 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <param name="warningDaysBeforeExpiry">Days before expiry to fire warning. Default is 30.</param>
         /// <param name="checkIntervalMs">How often to check expiry in ms. Default is 3600000 (1 hour).</param>
         /// <param name="topicPrefix">Topic prefix. Default is "devices".</param>
+        /// <param name="logger">Optional logger for certificate rotation diagnostics.</param>
         public CertificateRotationManager(
             string deviceId,
             string currentCertPem,
             string currentKeyPem,
             int warningDaysBeforeExpiry = 30,
             int checkIntervalMs = 3600000,
-            string topicPrefix = "devices")
+            string topicPrefix = "devices",
+            ILogger logger = null)
         {
             if (deviceId == null || deviceId.Length == 0)
             {
@@ -226,6 +228,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _disposed = false;
             _isMonitoring = false;
             _warningFired = false;
+            _logger = logger;
             NewCertificatePem = null;
             NewPrivateKeyPem = null;
 
@@ -240,11 +243,11 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             if (_certExpiryUtc != DateTime.MinValue)
             {
-                Debug.WriteLine($"[CertRotation] Certificate expires: {_certExpiryUtc:yyyy-MM-dd} ({DaysUntilExpiry} days remaining)");
+                _logger?.LogInfo("Certificate expires: " + _certExpiryUtc.ToString("yyyy-MM-dd") + " (" + DaysUntilExpiry + " days remaining)");
             }
             else
             {
-                Debug.WriteLine("[CertRotation] Could not determine certificate expiry date.");
+                _logger?.LogWarning("Could not determine certificate expiry date.");
             }
         }
 
@@ -277,7 +280,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _monitorThread.Priority = ThreadPriority.BelowNormal;
             _monitorThread.Start();
 
-            Debug.WriteLine($"[CertRotation] Monitoring started. Warning at {_warningDaysBeforeExpiry} days before expiry.");
+            _logger?.LogInfo("CertRotation: Monitoring started. Warning at " + _warningDaysBeforeExpiry + " days before expiry.");
         }
 
         /// <summary>
@@ -286,7 +289,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         public void StopMonitoring()
         {
             _isMonitoring = false;
-            Debug.WriteLine("[CertRotation] Monitoring stopped.");
+            _logger?.LogInfo("CertRotation: Monitoring stopped.");
         }
 
         /// <summary>
@@ -323,14 +326,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             if (!CertificateHelper.ValidateCertificateStrings("dummy-ca", newCertPem, newKeyPem))
             {
-                Debug.WriteLine("[CertRotation] New certificate validation failed.");
+                _logger?.LogError("CertRotation: New certificate validation failed.");
                 return false;
             }
 
             NewCertificatePem = newCertPem;
             NewPrivateKeyPem = newKeyPem;
 
-            Debug.WriteLine("[CertRotation] New certificate accepted and pending application.");
+            _logger?.LogInfo("CertRotation: New certificate accepted and pending application.");
             return true;
         }
 
@@ -343,7 +346,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             if (!HasPendingCertificate)
             {
-                Debug.WriteLine("[CertRotation] No pending certificate to apply.");
+                _logger?.LogWarning("CertRotation: No pending certificate to apply.");
                 return false;
             }
 
@@ -360,7 +363,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             NewCertificatePem = null;
             NewPrivateKeyPem = null;
 
-            Debug.WriteLine($"[CertRotation] Certificate applied. New expiry: {_certExpiryUtc:yyyy-MM-dd}");
+            _logger?.LogInfo("CertRotation: Certificate applied. New expiry: " + _certExpiryUtc.ToString("yyyy-MM-dd"));
 
             CertificateRotated?.Invoke(this, new CertificateRotatedEventArgs(
                 true, _certExpiryUtc, "Certificate rotated successfully."));
@@ -462,7 +465,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     {
                         _warningFired = true;
 
-                        Debug.WriteLine($"[CertRotation] WARNING: Certificate expires in {daysLeft} days!");
+                        _logger?.LogWarning("CertRotation: Certificate expires in " + daysLeft + " days!");
 
                         CertificateExpiring?.Invoke(this, new CertificateExpiringEventArgs(
                             _certExpiryUtc, daysLeft, _deviceId));
@@ -470,12 +473,12 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                     if (daysLeft <= 0)
                     {
-                        Debug.WriteLine("[CertRotation] CRITICAL: Certificate has EXPIRED!");
+                        _logger?.LogError("CertRotation: CRITICAL — Certificate has EXPIRED!");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"[CertRotation] Monitor error: {ex.Message}");
+                    _logger?.LogError("CertRotation: Monitor error: " + ex.Message);
                 }
             }
         }
@@ -484,13 +487,13 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             try
             {
-                Debug.WriteLine("[CertRotation] Received new certificate via MQTT.");
+                _logger?.LogInfo("CertRotation: Received new certificate via MQTT.");
 
                 Hashtable certData = (Hashtable)JsonConvert.DeserializeObject(payload, typeof(Hashtable));
 
                 if (certData == null)
                 {
-                    Debug.WriteLine("[CertRotation] Failed to parse certificate payload.");
+                    _logger?.LogError("CertRotation: Failed to parse certificate payload.");
                     CertificateRotated?.Invoke(this, new CertificateRotatedEventArgs(
                         false, DateTime.MinValue, "Failed to parse certificate payload."));
                     return;
@@ -501,7 +504,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 if (newCertPem == null || newKeyPem == null)
                 {
-                    Debug.WriteLine("[CertRotation] Certificate payload missing 'certificate' or 'privateKey' fields.");
+                    _logger?.LogError("CertRotation: Certificate payload missing 'certificate' or 'privateKey' fields.");
                     CertificateRotated?.Invoke(this, new CertificateRotatedEventArgs(
                         false, DateTime.MinValue, "Missing 'certificate' or 'privateKey' in payload."));
                     return;
@@ -509,7 +512,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 if (SetNewCertificate(newCertPem, newKeyPem))
                 {
-                    Debug.WriteLine("[CertRotation] New certificate staged. Call ApplyPendingCertificate() to apply.");
+                    _logger?.LogInfo("CertRotation: New certificate staged. Call ApplyPendingCertificate() to apply.");
                 }
                 else
                 {
@@ -519,9 +522,9 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[CertRotation] Error processing new certificate: {ex.Message}");
+                _logger?.LogError("CertRotation: Error processing new certificate: " + ex.Message);
                 CertificateRotated?.Invoke(this, new CertificateRotatedEventArgs(
-                    false, DateTime.MinValue, $"Error: {ex.Message}"));
+                    false, DateTime.MinValue, "Error: " + ex.Message));
             }
         }
 
@@ -538,9 +541,9 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 var cert = new X509Certificate(certPem);
                 return cert.GetExpirationDate();
             }
-            catch (Exception ex)
+            catch
             {
-                Debug.WriteLine($"[CertRotation] Could not extract expiry date: {ex.Message}");
+                // Could not extract expiry date from certificate
             }
 
             return DateTime.MinValue;

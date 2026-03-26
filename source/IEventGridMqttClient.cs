@@ -26,9 +26,19 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         bool IsReconnecting { get; }
 
         /// <summary>
+        /// Gets the current connection state of the client.
+        /// </summary>
+        ConnectionState State { get; }
+
+        /// <summary>
         /// Gets the device client ID used for this connection.
         /// </summary>
         string DeviceClientId { get; }
+
+        /// <summary>
+        /// Gets the offline message queue. Null if offline queueing is disabled.
+        /// </summary>
+        OfflineMessageQueue OfflineQueue { get; }
 
         /// <summary>
         /// Fired when a message is received on a subscribed topic.
@@ -44,6 +54,12 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// Fired when a published message is confirmed by the broker (QoS 1 only).
         /// </summary>
         event MessagePublishedEventHandler MessagePublished;
+
+        /// <summary>
+        /// Fired when an error occurs during any client operation.
+        /// Provides structured error information including category, recoverability, and context.
+        /// </summary>
+        event ClientErrorEventHandler ErrorOccurred;
 
         /// <summary>
         /// Connects to the Azure Event Grid MQTT broker.
@@ -131,7 +147,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// <summary>
         /// Returns the current free memory in bytes (via GC).
         /// </summary>
-        /// <returns>Free memory in bytes.</returns>
-        uint GetFreeMemory();
+        /// <returns>Free memory in bytes, or -1 if unavailable.</returns>
+        long GetFreeMemory();
     }
 }

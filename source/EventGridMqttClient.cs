@@ -3,12 +3,10 @@
 
 using System;
 using System.Collections;
-using System.Diagnostics;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using nanoFramework.Json;
-using nanoFramework.M2Mqtt;
 using nanoFramework.M2Mqtt.Messages;
 
 namespace nanoFramework.Azure.EventGrid.Mqtt
@@ -38,35 +36,33 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
     /// A high-level MQTT client for connecting .NET nanoFramework devices (ESP32)
     /// to the Azure EventGrid Namespace MQTT broker.
     /// <para>
+    /// Architecture: Separates MQTT transport concerns (<see cref="IMqttTransport"/>) from
+    /// Event Grid semantics (topic routing, twin sync, health, certificates).
     /// Handles X509 certificate authentication, MQTT5 protocol, automatic reconnection
-    /// with exponential backoff, topic management, and Last Will and Testament (LWT).
+    /// with exponential backoff, offline message queue, and structured error handling.
     /// </para>
     /// </summary>
     /// <example>
     /// <code>
-    /// var config = new EventGridMqttConfig
-    /// {
-    ///     BrokerHostname = "mynamespace.westeurope-1.ts.eventgrid.azure.net",
-    ///     DeviceClientId = "myDevice",
-    ///     CaCertificatePem = caCert,
-    ///     ClientCertificatePem = clientCert,
-    ///     ClientPrivateKeyPem = clientKey
-    /// };
+    /// var client = new EventGridMqttClientBuilder()
+    ///     .WithBroker("mynamespace.westeurope-1.ts.eventgrid.azure.net")
+    ///     .WithDevice("myDevice")
+    ///     .WithCertificates(caCert, clientCert, clientKey)
+    ///     .WithAutoReconnect()
+    ///     .WithOfflineQueue()
+    ///     .Build();
     ///
-    /// using (var client = new EventGridMqttClient(config))
-    /// {
-    ///     client.MessageReceived += (s, e) =&gt; Debug.WriteLine(e.Payload);
-    ///     client.Connect();
-    ///     client.Subscribe("devices/myDevice/commands");
-    ///     client.Publish("devices/myDevice/telemetry", "{\"temp\":23.5}");
-    /// }
+    /// client.ErrorOccurred += (s, e) =&gt; Debug.WriteLine("Error: " + e.Message);
+    /// client.Connect();
+    /// client.Subscribe("devices/myDevice/commands");
+    /// client.Publish("devices/myDevice/telemetry", "{\"temp\":23.5}");
     /// </code>
     /// </example>
     public class EventGridMqttClient : IEventGridMqttClient, IDisposable
     {
         private readonly EventGridMqttConfig _config;
         private readonly ILogger _logger;
-        private MqttClient _mqttClient;
+        private M2MqttTransport _transport;
         private readonly X509Certificate _caCert;
         private X509Certificate2 _clientCert;
         private readonly ConnectionManager _connectionManager;
@@ -76,6 +72,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         private readonly ArrayList _messageHandlers;
         private bool _disposed;
         private bool _intentionalDisconnect;
+        private ConnectionState _state;
+        private OfflineMessageQueue _offlineQueue;
 
         // Feature managers
         private DeviceTwinManager _twinManager;
@@ -98,27 +96,38 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         public event MessagePublishedEventHandler MessagePublished;
 
         /// <summary>
+        /// Fired when an error occurs during any client operation.
+        /// Provides structured error information including category, recoverability, and context.
+        /// </summary>
+        public event ClientErrorEventHandler ErrorOccurred;
+
+        /// <summary>
+        /// Gets the current connection state of the client.
+        /// </summary>
+        public ConnectionState State => _state;
+
+        /// <summary>
         /// Gets whether the client is currently connected to the MQTT broker.
         /// </summary>
-        public bool IsConnected => _mqttClient != null && _mqttClient.IsConnected;
+        public bool IsConnected => _transport != null && _transport.IsConnected;
 
         /// <summary>
         /// Gets whether the client is currently attempting to reconnect.
         /// </summary>
-        public bool IsReconnecting => _connectionManager != null && _connectionManager.IsReconnecting;
+        public bool IsReconnecting => _state == ConnectionState.Reconnecting;
 
         /// <summary>
-        /// Gets the Device Twin manager. Null if <see cref="EventGridMqttConfig.EnableDeviceTwin"/> is false.
+        /// Gets the Device Twin manager. Null if not enabled.
         /// </summary>
         public DeviceTwinManager Twin => _twinManager;
 
         /// <summary>
-        /// Gets the Health Reporter. Null if <see cref="EventGridMqttConfig.EnableHealthReporting"/> is false.
+        /// Gets the Health Reporter. Null if not enabled.
         /// </summary>
         public HealthReporter Health => _healthReporter;
 
         /// <summary>
-        /// Gets the Certificate Rotation manager. Null if <see cref="EventGridMqttConfig.EnableCertificateRotation"/> is false.
+        /// Gets the Certificate Rotation manager. Null if not enabled.
         /// </summary>
         public CertificateRotationManager CertRotation => _certRotationManager;
 
@@ -126,6 +135,11 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// Gets the device client ID used for this connection.
         /// </summary>
         public string DeviceClientId => _config.DeviceClientId;
+
+        /// <summary>
+        /// Gets the offline message queue. Null if offline queuing is not enabled.
+        /// </summary>
+        public OfflineMessageQueue OfflineQueue => _offlineQueue;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EventGridMqttClient"/> class.
@@ -170,8 +184,27 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             _logger.LogInfo("Certificates parsed successfully.");
 
-            // Create the MQTT client
-            CreateMqttClient();
+            // Create the MQTT transport layer
+            _transport = new M2MqttTransport(
+                _config.BrokerHostname,
+                _config.Port,
+                _caCert,
+                _clientCert,
+                _config.UseMqtt5,
+                _logger);
+
+            _transport.MessageReceived += OnTransportMessageReceived;
+            _transport.MessagePublished += OnTransportMessagePublished;
+            _transport.ConnectionClosed += OnTransportConnectionClosed;
+
+            // Set up offline queue
+            if (_config.EnableOfflineQueue)
+            {
+                _offlineQueue = new OfflineMessageQueue(_config.MaxOfflineQueueSize, _logger);
+                _logger.LogInfo("Offline message queue enabled (max " + _config.MaxOfflineQueueSize + " messages).");
+            }
+
+            _state = ConnectionState.Disconnected;
 
             // Set up connection manager
             if (_config.AutoReconnect)
@@ -224,7 +257,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     _config.ClientPrivateKeyPem,
                     _config.CertWarningDaysBeforeExpiry,
                     _config.CertCheckIntervalMs,
-                    _config.CertTopicPrefix);
+                    _config.CertTopicPrefix,
+                    _logger);
 
                 _certRotationManager.CertificateExpiring += OnCertificateExpiring;
                 _certRotationManager.CertificateRotated += OnCertificateRotated;
@@ -248,42 +282,42 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 return MqttReasonCode.Success;
             }
 
-            _logger.LogInfo($"Connecting to {_config.BrokerHostname}:{_config.Port} as '{_config.DeviceClientId}'...");
+            _state = ConnectionState.Connecting;
+            _logger.LogInfo("Connecting to " + _config.BrokerHostname + ":" + _config.Port + " as '" + _config.DeviceClientId + "'...");
 
             MqttReasonCode result;
 
-            bool hasLwt = _config.LwtTopic != null && _config.LwtTopic.Length > 0;
+            try
+            {
+                bool hasLwt = _config.LwtTopic != null && _config.LwtTopic.Length > 0;
 
-            if (hasLwt)
-            {
-                result = _mqttClient.Connect(
+                result = _transport.Connect(
                     _config.DeviceClientId,
-                    null,                   // username (not used with X509)
-                    null,                   // password (not used with X509)
-                    _config.LwtRetain,
+                    _config.CleanSession,
+                    _config.KeepAlivePeriodSeconds,
+                    hasLwt ? _config.LwtTopic : null,
+                    hasLwt ? (_config.LwtMessage ?? "") : null,
                     _config.LwtQos,
-                    true,                   // willFlag
-                    _config.LwtTopic,
-                    _config.LwtMessage ?? "",
-                    _config.CleanSession,
-                    _config.KeepAlivePeriodSeconds);
+                    _config.LwtRetain);
             }
-            else
+            catch (Exception ex)
             {
-                result = _mqttClient.Connect(
-                    _config.DeviceClientId,
-                    null,
-                    null,
-                    _config.CleanSession,
-                    _config.KeepAlivePeriodSeconds);
+                _state = ConnectionState.Faulted;
+                _logger.LogError("Connection exception: " + ex.Message);
+                RaiseError(ErrorCategory.Connection, "Connection failed: " + ex.Message, ex, _config.BrokerHostname, false);
+                return MqttReasonCode.UnspecifiedError;
             }
 
             if (result == MqttReasonCode.Success)
             {
+                _state = ConnectionState.Connected;
                 _logger.LogInfo("Connected successfully.");
                 _intentionalDisconnect = false;
 
                 _healthReporter?.UpdateConnectionStatus(true);
+
+                // Flush any queued offline messages
+                FlushOfflineQueue();
 
                 // Auto-subscribe to feature topics
                 AutoSubscribeFeatureTopics();
@@ -296,10 +330,12 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
             else
             {
-                _logger.LogError($"Connection failed: {result}");
+                _state = ConnectionState.Faulted;
+                _logger.LogError("Connection failed: " + result);
+                RaiseError(ErrorCategory.Connection, "Connection failed: " + result, null, _config.BrokerHostname, true);
 
                 ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(
-                    false, $"Connection failed: {result}"));
+                    false, "Connection failed: " + result));
             }
 
             return result;
@@ -318,13 +354,14 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             _healthReporter?.Stop();
             _certRotationManager?.StopMonitoring();
 
-            if (_mqttClient != null && _mqttClient.IsConnected)
+            if (_transport != null && _transport.IsConnected)
             {
                 _logger.LogInfo("Disconnecting...");
-                _mqttClient.Disconnect();
+                _transport.Disconnect();
                 _logger.LogInfo("Disconnected.");
             }
 
+            _state = ConnectionState.Disconnected;
             _healthReporter?.UpdateConnectionStatus(false);
 
             ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(
@@ -355,7 +392,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             _logger.LogInfo($"Subscribing to: {topic}");
 
-            _mqttClient.Subscribe(
+            _transport.Subscribe(
                 new string[] { topic },
                 new MqttQoSLevel[] { qos });
 
@@ -382,7 +419,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             if (IsConnected)
             {
-                _mqttClient.Unsubscribe(new string[] { topic });
+                _transport.Unsubscribe(new string[] { topic });
             }
 
             int index = _subscribedTopics.IndexOf(topic);
@@ -412,11 +449,6 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             ThrowIfDisposed();
 
-            if (!IsConnected)
-            {
-                throw new InvalidOperationException("Cannot publish: not connected.");
-            }
-
             if (topic == null || topic.Length == 0)
             {
                 throw new ArgumentException("Topic cannot be null or empty.");
@@ -431,6 +463,18 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     "Payload size (" + payloadBytes.Length + " bytes) exceeds maximum (" + _config.MaxPayloadSize + " bytes).");
             }
 
+            // Queue message if disconnected and offline queue is enabled
+            if (!IsConnected)
+            {
+                if (_offlineQueue != null)
+                {
+                    _offlineQueue.Enqueue(topic, payloadBytes, qos, retain);
+                    return 0;
+                }
+
+                throw new InvalidOperationException("Cannot publish: not connected.");
+            }
+
             // Auto GC if memory is low
             if (_config.AutoGarbageCollect)
             {
@@ -439,32 +483,42 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             _healthReporter?.IncrementPublished();
 
-            // Use retry handler if configured
-            if (_publishRetryHandler != null)
+            try
             {
-                ushort msgId = 0;
-                string topicCapture = topic;
-                byte[] bytesCapture = payloadBytes;
-                MqttQoSLevel qosCapture = qos;
-                bool retainCapture = retain;
-
-                bool success = _publishRetryHandler.ExecuteWithRetry(
-                    () =>
-                    {
-                        msgId = _mqttClient.Publish(topicCapture, bytesCapture, null, null, qosCapture, retainCapture);
-                        return true;
-                    },
-                    "Publish to " + topic);
-
-                if (!success)
+                // Use retry handler if configured
+                if (_publishRetryHandler != null)
                 {
-                    _logger.LogError("Publish failed after retries: " + topic);
+                    ushort msgId = 0;
+                    string topicCapture = topic;
+                    byte[] bytesCapture = payloadBytes;
+                    MqttQoSLevel qosCapture = qos;
+                    bool retainCapture = retain;
+
+                    bool success = _publishRetryHandler.ExecuteWithRetry(
+                        () =>
+                        {
+                            msgId = _transport.Publish(topicCapture, bytesCapture, qosCapture, retainCapture);
+                            return true;
+                        },
+                        "Publish to " + topic);
+
+                    if (!success)
+                    {
+                        _logger.LogError("Publish failed after retries: " + topic);
+                        RaiseError(ErrorCategory.Publish, "Publish failed after retries", null, topic, true);
+                    }
+
+                    return msgId;
                 }
 
-                return msgId;
+                return _transport.Publish(topic, payloadBytes, qos, retain);
             }
-
-            return _mqttClient.Publish(topic, payloadBytes, null, null, qos, retain);
+            catch (Exception ex)
+            {
+                _logger.LogError("Publish error: " + ex.Message);
+                RaiseError(ErrorCategory.Publish, "Publish failed: " + ex.Message, ex, topic, true);
+                return 0;
+            }
         }
 
         /// <summary>
@@ -495,16 +549,23 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         {
             ThrowIfDisposed();
 
-            if (!IsConnected)
-            {
-                throw new InvalidOperationException("Cannot publish: not connected.");
-            }
-
             // Validate payload size for ESP32 memory safety
             if (_config.MaxPayloadSize > 0 && payload != null && payload.Length > _config.MaxPayloadSize)
             {
                 throw new ArgumentException(
                     "Payload size (" + payload.Length + " bytes) exceeds maximum (" + _config.MaxPayloadSize + " bytes).");
+            }
+
+            // Queue message if disconnected and offline queue is enabled
+            if (!IsConnected)
+            {
+                if (_offlineQueue != null)
+                {
+                    _offlineQueue.Enqueue(topic, payload, qos, retain);
+                    return 0;
+                }
+
+                throw new InvalidOperationException("Cannot publish: not connected.");
             }
 
             if (_config.AutoGarbageCollect)
@@ -514,26 +575,35 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             _healthReporter?.IncrementPublished();
 
-            if (_publishRetryHandler != null)
+            try
             {
-                ushort msgId = 0;
-                string topicCapture = topic;
-                byte[] bytesCapture = payload;
-                MqttQoSLevel qosCapture = qos;
-                bool retainCapture = retain;
+                if (_publishRetryHandler != null)
+                {
+                    ushort msgId = 0;
+                    string topicCapture = topic;
+                    byte[] bytesCapture = payload;
+                    MqttQoSLevel qosCapture = qos;
+                    bool retainCapture = retain;
 
-                _publishRetryHandler.ExecuteWithRetry(
-                    () =>
-                    {
-                        msgId = _mqttClient.Publish(topicCapture, bytesCapture, null, null, qosCapture, retainCapture);
-                        return true;
-                    },
-                    "PublishRaw to " + topic);
+                    _publishRetryHandler.ExecuteWithRetry(
+                        () =>
+                        {
+                            msgId = _transport.Publish(topicCapture, bytesCapture, qosCapture, retainCapture);
+                            return true;
+                        },
+                        "PublishRaw to " + topic);
 
-                return msgId;
+                    return msgId;
+                }
+
+                return _transport.Publish(topic, payload, qos, retain);
             }
-
-            return _mqttClient.Publish(topic, payload, null, null, qos, retain);
+            catch (Exception ex)
+            {
+                _logger.LogError("PublishRaw error: " + ex.Message);
+                RaiseError(ErrorCategory.Publish, "PublishRaw failed: " + ex.Message, ex, topic, true);
+                return 0;
+            }
         }
 
         /// <summary>
@@ -548,17 +618,19 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
             _disposed = true;
             _intentionalDisconnect = true;
+            _state = ConnectionState.Disconnected;
             _connectionManager?.Stop();
             _healthReporter?.Dispose();
             _certRotationManager?.Dispose();
 
-            if (_mqttClient != null)
+            if (_transport != null)
             {
                 try
                 {
-                    if (_mqttClient.IsConnected)
+                    _transport.DetachEvents();
+                    if (_transport.IsConnected)
                     {
-                        _mqttClient.Disconnect();
+                        _transport.Disconnect();
                     }
                 }
                 catch
@@ -566,56 +638,31 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                     // Suppress exceptions during disposal
                 }
 
-                _mqttClient = null;
+                _transport = null;
             }
 
+            _offlineQueue?.Clear();
             _subscribedTopics.Clear();
             _subscribedQos.Clear();
         }
 
         #region Private Methods
 
-        private void CreateMqttClient()
+        private void OnTransportMessageReceived(object sender, string topic, byte[] rawPayload, byte qos, bool retain)
         {
-            _mqttClient = new MqttClient(
-                _config.BrokerHostname,
-                _config.Port,
-                true,                       // secure
-                _caCert,                    // CA cert for server validation
-                _clientCert,                // client cert for authentication
-                MqttSslProtocols.TLSv1_2);
+            string payload = Encoding.UTF8.GetString(rawPayload, 0, rawPayload.Length);
 
-            // Set protocol version
-            if (_config.UseMqtt5)
-            {
-                _mqttClient.ProtocolVersion = MqttProtocolVersion.Version_5;
-            }
-
-            // Wire up internal event handlers
-            _mqttClient.MqttMsgPublishReceived += OnMqttMessageReceived;
-            _mqttClient.MqttMsgPublished += OnMqttMessagePublished;
-            _mqttClient.ConnectionClosed += OnMqttConnectionClosed;
-        }
-
-        private void OnMqttMessageReceived(object sender, MqttMsgPublishEventArgs e)
-        {
-            string topic = e.Topic;
-            string payload = Encoding.UTF8.GetString(e.Message, 0, e.Message.Length);
-
-            _logger.LogInfo($"Message received on '{topic}': {payload}");
+            _logger.LogInfo("Message received on '" + topic + "': " + payload);
 
             _healthReporter?.IncrementReceived();
 
             // Route to feature managers first
-            bool handled = false;
-
             for (int i = 0; i < _messageHandlers.Count; i++)
             {
                 IMqttMessageHandler handler = (IMqttMessageHandler)_messageHandlers[i];
 
                 if (handler.ProcessMessage(topic, payload))
                 {
-                    handled = true;
                     break;
                 }
             }
@@ -624,19 +671,19 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             MessageReceived?.Invoke(this, new MessageReceivedEventArgs(
                 topic,
                 payload,
-                e.Message,
-                (byte)e.QosLevel,
-                e.Retain));
+                rawPayload,
+                qos,
+                retain));
         }
 
-        private void OnMqttMessagePublished(object sender, MqttMsgPublishedEventArgs e)
+        private void OnTransportMessagePublished(object sender, ushort messageId, bool isPublished)
         {
             MessagePublished?.Invoke(this, new MessagePublishedEventArgs(
-                e.MessageId,
-                e.IsPublished));
+                messageId,
+                isPublished));
         }
 
-        private void OnMqttConnectionClosed(object sender, EventArgs e)
+        private void OnTransportConnectionClosed(object sender)
         {
             _logger.LogInfo("Connection closed.");
 
@@ -645,8 +692,11 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
                 return;
             }
 
+            _state = ConnectionState.Reconnecting;
             _healthReporter?.RecordConnectionDrop();
             _healthReporter?.UpdateConnectionStatus(false);
+
+            RaiseError(ErrorCategory.Network, "Connection lost unexpectedly.", null, null, true);
 
             ConnectionStateChanged?.Invoke(this, new ConnectionStateChangedEventArgs(
                 false, "Connection lost unexpectedly."));
@@ -659,19 +709,40 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
         }
 
+        private void FlushOfflineQueue()
+        {
+            if (_offlineQueue == null || !_offlineQueue.HasPendingMessages)
+            {
+                return;
+            }
+
+            _offlineQueue.Flush((topic, payload, qos, retain) =>
+            {
+                try
+                {
+                    _transport.Publish(topic, payload, qos, retain);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            });
+        }
+
+        private void RaiseError(ErrorCategory category, string message, Exception ex, string context, bool isRecoverable)
+        {
+            ErrorOccurred?.Invoke(this, new ClientErrorEventArgs(category, message, ex, context, isRecoverable));
+        }
+
         private bool AttemptReconnect()
         {
             try
             {
-                // Recreate the MQTT client (old one may be in bad state)
-                if (_mqttClient != null)
-                {
-                    _mqttClient.MqttMsgPublishReceived -= OnMqttMessageReceived;
-                    _mqttClient.MqttMsgPublished -= OnMqttMessagePublished;
-                    _mqttClient.ConnectionClosed -= OnMqttConnectionClosed;
-                }
+                _state = ConnectionState.Reconnecting;
 
-                CreateMqttClient();
+                // Recreate the transport (old socket may be in bad state)
+                _transport.Recreate();
 
                 // Attempt to connect
                 var result = Connect();
@@ -688,7 +759,8 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Reconnect error: {ex.Message}");
+                _logger.LogError("Reconnect error: " + ex.Message);
+                RaiseError(ErrorCategory.Connection, "Reconnect failed: " + ex.Message, ex, null, true);
                 return false;
             }
         }
@@ -709,7 +781,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
 
                 try
                 {
-                    _mqttClient.Subscribe(
+                    _transport.Subscribe(
                         new string[] { topic },
                         new MqttQoSLevel[] { qos });
 
@@ -928,22 +1000,16 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             // Disconnect and reconnect with new cert
             _intentionalDisconnect = true;
 
-            if (_mqttClient != null && _mqttClient.IsConnected)
+            if (_transport != null && _transport.IsConnected)
             {
-                _mqttClient.Disconnect();
+                _transport.Disconnect();
             }
 
             _intentionalDisconnect = false;
 
-            // Recreate MQTT client with new cert
-            if (_mqttClient != null)
-            {
-                _mqttClient.MqttMsgPublishReceived -= OnMqttMessageReceived;
-                _mqttClient.MqttMsgPublished -= OnMqttMessagePublished;
-                _mqttClient.ConnectionClosed -= OnMqttConnectionClosed;
-            }
-
-            CreateMqttClient();
+            // Update transport certificate and recreate
+            _transport.UpdateClientCertificate(_clientCert);
+            _transport.Recreate();
 
             var result = Connect();
 
@@ -955,6 +1021,7 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
             }
 
             _logger.LogError("Certificate rotation failed — could not reconnect.");
+            RaiseError(ErrorCategory.Certificate, "Certificate rotation failed", null, null, true);
             return false;
         }
 

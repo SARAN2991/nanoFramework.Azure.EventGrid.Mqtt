@@ -169,6 +169,29 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
+        /// Enables offline message queueing when disconnected.
+        /// Messages published while offline are automatically flushed on reconnect.
+        /// </summary>
+        /// <param name="maxSize">Maximum number of messages to queue. Default is 20.</param>
+        /// <returns>This builder for method chaining.</returns>
+        public EventGridMqttClientBuilder WithOfflineQueue(int maxSize = 20)
+        {
+            _config.EnableOfflineQueue = true;
+            _config.MaxOfflineQueueSize = maxSize;
+            return this;
+        }
+
+        /// <summary>
+        /// Disables offline message queueing. Messages published while disconnected will throw.
+        /// </summary>
+        /// <returns>This builder for method chaining.</returns>
+        public EventGridMqttClientBuilder WithoutOfflineQueue()
+        {
+            _config.EnableOfflineQueue = false;
+            return this;
+        }
+
+        /// <summary>
         /// Sets the MQTT protocol version.
         /// </summary>
         /// <param name="useMqtt5">True for MQTT v5.0 (default), false for v3.1.1.</param>

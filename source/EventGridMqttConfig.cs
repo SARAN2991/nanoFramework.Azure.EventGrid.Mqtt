@@ -198,6 +198,22 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         /// </summary>
         public bool AutoGarbageCollect { get; set; } = true;
 
+        // ───── Offline Message Queue ─────
+
+        /// <summary>
+        /// Whether to enable the offline message queue. Default is true.
+        /// When enabled, messages published while disconnected are queued and automatically
+        /// flushed (published) when the connection is restored.
+        /// </summary>
+        public bool EnableOfflineQueue { get; set; } = true;
+
+        /// <summary>
+        /// Maximum number of messages to hold in the offline queue. Default is 20.
+        /// When the queue is full, the oldest message is dropped (FIFO eviction).
+        /// Keep this low on ESP32 to avoid memory exhaustion.
+        /// </summary>
+        public int MaxOfflineQueueSize { get; set; } = 20;
+
         // ───── Logging ─────
 
         /// <summary>
