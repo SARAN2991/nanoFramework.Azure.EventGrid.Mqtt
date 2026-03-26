@@ -631,7 +631,7 @@ bool valid = CertificateHelper.ValidateCertificateStrings(caCert, clientCert, cl
 // Use with builder
 var client = new EventGridMqttClientBuilder()
     .WithBroker("ns.westus2.ts.eventgrid.azure.net")
-    .WithDeviceId("device01")
+    .WithDevice("device01")
     .WithCertificates(caCert, clientCert, clientKey)
     .Build();
 ```
@@ -744,6 +744,7 @@ ESP32 Device                              Azure Event Grid
 | nanoFramework.System.Text | 1.3.42 |
 | nanoFramework.Runtime.Events | 1.11.32 |
 | nanoFramework.System.Collections | 1.5.67 |
+| nanoFramework.System.IO.Streams | 1.1.96 |
 | nanoFramework.System.Net | 1.11.47 |
 | nanoFramework.System.Threading | 1.1.52 |
 | nanoFramework.Runtime.Native | 1.7.11 |
