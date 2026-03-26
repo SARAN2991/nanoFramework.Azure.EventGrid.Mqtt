@@ -3,6 +3,7 @@
 
 using System;
 using System.Threading;
+using nanoFramework.M2Mqtt.Messages;
 
 namespace nanoFramework.Azure.EventGrid.Mqtt
 {
@@ -122,6 +123,81 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
         }
 
         /// <summary>
+        /// Executes a publish operation with retry logic and exponential backoff.
+        /// Unlike <see cref="ExecuteWithRetry"/>, this overload accepts publish parameters
+        /// directly to avoid per-call closure/delegate allocation on the embedded heap.
+        /// </summary>
+        /// <param name="action">The pre-allocated publish delegate (typically <c>transport.Publish</c>).</param>
+        /// <param name="topic">The MQTT topic to publish to.</param>
+        /// <param name="payload">The byte payload to publish.</param>
+        /// <param name="qos">QoS level for the publish.</param>
+        /// <param name="retain">Retain flag for the publish.</param>
+        /// <param name="messageId">Receives the message ID returned by the transport on success, or 0 on failure.</param>
+        /// <returns>True if the publish succeeded within allowed retries, false if all retries exhausted.</returns>
+        public bool ExecutePublishWithRetry(
+            DirectPublishAction action,
+            string topic,
+            byte[] payload,
+            MqttQoSLevel qos,
+            bool retain,
+            out ushort messageId)
+        {
+            messageId = 0;
+
+            if (action == null)
+            {
+                return false;
+            }
+
+            // First attempt (not a retry)
+            try
+            {
+                messageId = action(topic, payload, qos, retain);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning("Publish to '" + topic + "' failed: " + ex.Message);
+            }
+
+            // Retry loop
+            int delay = _baseDelayMs;
+
+            for (int attempt = 1; attempt <= _maxRetries; attempt++)
+            {
+                TotalRetries++;
+
+                int jitter = GetJitter(delay / 4);
+
+                _logger?.LogInfo("Publish retry " + attempt + "/" + _maxRetries + " for '" + topic + "' in " + (delay + jitter) + "ms");
+
+                Thread.Sleep(delay + jitter);
+
+                try
+                {
+                    messageId = action(topic, payload, qos, retain);
+                    _logger?.LogInfo("Publish to '" + topic + "' succeeded on retry " + attempt);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.LogWarning("Publish retry " + attempt + " for '" + topic + "' failed: " + ex.Message);
+                }
+
+                delay = delay * 2;
+
+                if (delay > _maxDelayMs)
+                {
+                    delay = _maxDelayMs;
+                }
+            }
+
+            TotalFailures++;
+            _logger?.LogError("Publish to '" + topic + "' failed after " + _maxRetries + " retries.");
+            return false;
+        }
+
+        /// <summary>
         /// Calculates the delay in milliseconds for a specific retry attempt.
         /// Uses exponential backoff: baseDelay * 2^(attempt-1), capped at maxDelay.
         /// </summary>
@@ -177,4 +253,15 @@ namespace nanoFramework.Azure.EventGrid.Mqtt
     /// </summary>
     /// <returns>True if the operation succeeded, false otherwise.</returns>
     public delegate bool RetryAction();
+
+    /// <summary>
+    /// Delegate for a direct MQTT publish operation used by <see cref="RetryHandler.ExecutePublishWithRetry"/>.
+    /// Accepts publish parameters directly to avoid closure allocation on each publish call.
+    /// </summary>
+    /// <param name="topic">The MQTT topic.</param>
+    /// <param name="payload">The byte payload.</param>
+    /// <param name="qos">QoS level.</param>
+    /// <param name="retain">Retain flag.</param>
+    /// <returns>The message ID assigned by the transport.</returns>
+    public delegate ushort DirectPublishAction(string topic, byte[] payload, MqttQoSLevel qos, bool retain);
 }
