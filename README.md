@@ -109,65 +109,314 @@ using (var client = new EventGridMqttClient(config))
 
 ## ESP32 Setup Guide
 
-This section walks you through every step from a bare ESP32 board to a device publishing telemetry to Azure Event Grid.
+This section is written for **complete beginners**. Follow all six steps in order and you will have an ESP32 board publishing telemetry to Azure Event Grid over MQTT.
 
-### Step 1 — Flash nanoFramework Firmware
+---
 
-Install the nanoFramework firmware flasher tool and flash your board:
+### Step 1 — Flash nanoFramework Firmware onto the ESP32
+
+nanoFramework is a tiny .NET runtime that runs on microcontrollers. You have to flash it onto your board before you can deploy any C# code to it.
+
+#### 1a — Install prerequisites
+
+| Prerequisite | What to do |
+|---|---|
+| **.NET SDK 8** (or newer) | Download and install from [https://dot.net](https://dot.net). Run `dotnet --version` in a terminal to verify. |
+| **USB driver for your board** | Most ESP32 boards use a CH340 or CP2102 USB-to-serial chip. Install the driver for your chip (search *"CH340 driver"* or *"CP2102 driver"* for your OS). |
+| **USB cable** | Use a **data** cable (not a charge-only cable). Plug the board into your PC. |
+
+#### 1b — Install the firmware flasher tool (nanoff)
+
+Open a terminal (Command Prompt / PowerShell / Terminal) and run:
 
 ```bash
-# Install nanoff (one-time)
 dotnet tool install -g nanoff
+```
 
-# Flash ESP32 (replace COM3 with your port)
+Verify it installed correctly:
+
+```bash
+nanoff --version
+```
+
+#### 1c — Find your board's COM port
+
+**Windows:** Open **Device Manager → Ports (COM & LPT)**. Look for *USB Serial Device* or *CH340*. Note the port, e.g. `COM3`.
+
+**Linux / macOS:** Run:
+
+```bash
+nanoff --listports
+```
+
+The port is usually `/dev/ttyUSB0` (Linux) or `/dev/cu.usbserial-*` (macOS).
+
+#### 1d — Flash the firmware
+
+Replace `COM3` with your actual port:
+
+```bash
 nanoff --target ESP32_REV0 --serialport COM3 --update
 ```
 
-> **Tip:** On Linux/macOS the port is typically `/dev/ttyUSB0`. Run `nanoff --listports` to find it.
-> For ESP32-S3 or other variants, replace `ESP32_REV0` with the correct target (e.g. `ESP32_S3`, `ESP32_C3`).
-> A full list of targets is at [nanoFirmwareFlasher releases](https://github.com/nanoframework/nanoFirmwareFlasher).
+You should see progress messages and a final `Device flashed successfully`. The board will reboot automatically.
+
+> **Which target should I use?**
+> | Board variant | Target name |
+> |---|---|
+> | Standard ESP32 | `ESP32_REV0` |
+> | ESP32-S3 | `ESP32_S3` |
+> | ESP32-C3 | `ESP32_C3` |
+> | ESP32-S2 | `ESP32_S2` |
+> | WROVER module | `ESP32_WROVER` |
+>
+> A full list is at the [nanoFirmwareFlasher releases page](https://github.com/nanoframework/nanoFirmwareFlasher/releases).
+
+---
 
 ### Step 2 — Create a nanoFramework Project in Visual Studio
 
-1. Install **Visual Studio 2022** and the [nanoFramework VS Extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension).
-2. Go to **File → New → Project** and search for **nanoFramework**.
-3. Select **nanoFramework Application** and click **Create**.
-4. In **Solution Explorer**, right-click the project → **Properties → nanoFramework** → confirm the target matches your board.
+#### 2a — Install Visual Studio 2022 and the nanoFramework extension
+
+1. Download **Visual Studio 2022 Community** (free) from [https://visualstudio.microsoft.com](https://visualstudio.microsoft.com).
+2. During installation, select the **.NET desktop development** workload.
+3. After installation, open Visual Studio and go to **Extensions → Manage Extensions**.
+4. Search for **nanoFramework** and install the [nanoFramework VS2022 Extension](https://marketplace.visualstudio.com/items?itemName=nanoframework.nanoFramework-VS2022-Extension).
+5. Restart Visual Studio when prompted.
+
+#### 2b — Create a new project
+
+1. Open Visual Studio 2022.
+2. Click **Create a new project**.
+3. In the search box, type `nanoFramework`.
+4. Select **nanoFramework Application** and click **Next**.
+5. Set **Project name** to e.g. `MyEventGridDevice` and choose a folder. Click **Create**.
+
+#### 2c — Set the target device
+
+1. In **Solution Explorer**, right-click the project → **Properties**.
+2. Click the **nanoFramework** tab on the left.
+3. Under **Target**, choose the same target you used when flashing (e.g. `ESP32_REV0`).
+4. Save and close the properties window.
+
+> The project already contains a `Program.cs` file with a `Main()` method — this is where all your code will go.
+
+---
 
 ### Step 3 — Install the NuGet Package
 
-In the **Package Manager Console**:
+#### 3a — Via the Package Manager Console (quickest)
+
+Go to **Tools → NuGet Package Manager → Package Manager Console** and run:
 
 ```powershell
 Install-Package nanoFramework.Azure.EventGrid.Mqtt -Version 0.1.0-preview
 ```
 
-Or via **Manage NuGet Packages → Browse**, search for `nanoFramework.Azure.EventGrid.Mqtt`, and install it.
+#### 3b — Via the GUI
 
-> The package pulls in all nanoFramework dependencies automatically (`nanoFramework.M2Mqtt`, `nanoFramework.Json`, etc.).
+1. In **Solution Explorer**, right-click the project → **Manage NuGet Packages**.
+2. Click the **Browse** tab.
+3. In the search box type `nanoFramework.Azure.EventGrid.Mqtt`.
+4. Select the package in the list, choose version `0.1.0-preview`, and click **Install**.
+5. Accept the licence prompt.
 
-### Step 4 — Prepare Certificates
+> **What gets installed?** The package automatically pulls in all required nanoFramework libraries: `nanoFramework.M2Mqtt` (MQTT transport), `nanoFramework.Json` (JSON serialisation), `nanoFramework.System.Net` (networking), and several others. You do not need to install them separately.
 
-Embed your three PEM strings as `const string` values in `Program.cs` (see the [Certificate Setup Guide](#certificate-setup-guide) section below for how to generate and register them).
+---
+
+### Step 4 — Generate Certificates and Embed Them in Code
+
+Azure Event Grid requires every device to authenticate with **X.509 certificates**. You need three things:
+
+| What | Purpose |
+|---|---|
+| **CA root certificate** | Lets your ESP32 *verify* that it is really talking to Azure (downloaded, not generated) |
+| **Device certificate** | Tells Azure *who your ESP32 is* (you generate this) |
+| **Device private key** | The secret that proves ownership of the device certificate (you generate this) |
+
+#### 4a — Install OpenSSL
+
+OpenSSL is a command-line tool used to generate certificates.
+
+- **Windows:** Download the installer from [https://slproweb.com/products/Win32OpenSSL.html](https://slproweb.com/products/Win32OpenSSL.html). Install the *full* version (not Light). After installation, open a new Command Prompt and run `openssl version` to verify.
+- **macOS:** OpenSSL is usually pre-installed. Run `openssl version` in Terminal to check.
+- **Linux (Ubuntu/Debian):** Run `sudo apt install openssl`.
+
+#### 4b — Download the CA Root Certificate
+
+Your device needs the **DigiCert Global Root G2** certificate to verify the Azure Event Grid broker's identity.
+
+1. Open your browser and go to: [https://www.digicert.com/kb/digicert-root-certificates.htm](https://www.digicert.com/kb/digicert-root-certificates.htm)
+2. Find **DigiCert Global Root G2** and download the **PEM** file (it will be called something like `DigiCertGlobalRootG2.pem`).
+3. Open the downloaded file in any text editor (Notepad, VS Code, etc.). It looks like this:
+
+```
+-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+... (more base64 lines) ...
+-----END CERTIFICATE-----
+```
+
+4. Copy the **entire contents** of the file (including the `-----BEGIN CERTIFICATE-----` and `-----END CERTIFICATE-----` lines). You will paste this into your code in step 4e.
+
+#### 4c — Generate a Device Private Key
+
+Open a terminal/command prompt, create a folder for your device certificates, and run:
+
+```bash
+mkdir my-device-certs
+cd my-device-certs
+
+# Generate a 2048-bit RSA private key
+openssl genrsa -out device01.key 2048
+```
+
+This creates a file called `device01.key`. **Keep this file private** — never share it or commit it to source control.
+
+#### 4d — Generate a Device Certificate
+
+First, create a Certificate Signing Request (CSR). The **CN** (Common Name) becomes the device client ID you register in Azure — keep it simple, no spaces.
+
+```bash
+# Create a Certificate Signing Request (CSR)
+openssl req -new -key device01.key -out device01.csr -subj "/CN=esp32-device-001"
+
+# Self-sign the certificate (valid for 365 days — use 730–1095 days for production)
+openssl x509 -req -in device01.csr -signkey device01.key -out device01.pem -days 365
+```
+
+You now have two important files:
+- `device01.pem` — the **device certificate** (public)
+- `device01.key` — the **device private key** (secret)
+
+Verify the certificate was created:
+
+```bash
+openssl x509 -in device01.pem -noout -text
+```
+
+You should see subject, validity dates, and other details.
+
+#### 4e — Register the Device in Azure
+
+You need an Azure subscription and the [Azure CLI](https://learn.microsoft.com/azure/cli/install) installed.
+
+**4e-i: Create an Event Grid Namespace** (skip if you already have one):
+
+```bash
+az login
+
+az eventgrid namespace create \
+  --name my-eg-namespace \
+  --resource-group my-rg \
+  --location westeurope \
+  --topic-spaces-configuration "{state:Enabled}"
+```
+
+**4e-ii: Get the certificate thumbprint**:
+
+```bash
+openssl x509 -in device01.pem -noout -fingerprint -sha256
+```
+
+This prints something like:
+```
+SHA256 Fingerprint=A1:B2:C3:D4:...:FF
+```
+
+Copy the value **after** `SHA256 Fingerprint=` and remove the colons: `A1B2C3D4...FF`.
+
+**4e-iii: Register the device**:
+
+```bash
+az eventgrid namespace client create \
+  --resource-group my-rg \
+  --namespace-name my-eg-namespace \
+  --client-name esp32-device-001 \
+  --authentication "{thumbprintMatch:{primary:'A1B2C3D4...FF'}}" \
+  --state Enabled
+```
+
+**4e-iv: Create a Topic Space and Permission Bindings** so the device is allowed to publish and subscribe:
+
+```bash
+# Create a topic space covering all device topics
+az eventgrid namespace topic-space create \
+  --name device-topics \
+  --namespace-name my-eg-namespace \
+  --resource-group my-rg \
+  --topic-templates "devices/+/telemetry" "devices/+/commands" "devices/+/status"
+
+# Allow all registered clients to publish
+az eventgrid namespace permission-binding create \
+  --name device-pub \
+  --namespace-name my-eg-namespace \
+  --resource-group my-rg \
+  --client-group-name '$all' \
+  --topic-space-name device-topics \
+  --permission publisher
+
+# Allow all registered clients to subscribe
+az eventgrid namespace permission-binding create \
+  --name device-sub \
+  --namespace-name my-eg-namespace \
+  --resource-group my-rg \
+  --client-group-name '$all' \
+  --topic-space-name device-topics \
+  --permission subscriber
+```
+
+**4e-v: Note your broker hostname**. In the Azure Portal, open your Event Grid Namespace → **Overview**. Copy the **MQTT hostname** — it looks like:
+```
+my-eg-namespace.westeurope-1.ts.eventgrid.azure.net
+```
+
+#### 4f — Embed the PEM Strings in Your C# Code
+
+Open your `device01.pem` and `device01.key` files in a text editor, then copy their full contents into `Program.cs` as `const string` constants.
 
 ```csharp
+// ── CA Root Certificate (downloaded from DigiCert) ──────────────────────
+// Paste the ENTIRE content of DigiCertGlobalRootG2.pem here
 private const string CaCert =
 @"-----BEGIN CERTIFICATE-----
-<DigiCert Global Root G2 PEM here>
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+... paste all lines from your .pem file here ...
 -----END CERTIFICATE-----";
 
+// ── Device Certificate (your device01.pem) ───────────────────────────────
+// Paste the ENTIRE content of device01.pem here
 private const string ClientCert =
 @"-----BEGIN CERTIFICATE-----
-<Your device certificate PEM here>
+MIICpDCCAYwCCQDU9pQpFnhMsTANBgkqhkiG9w0BAQsFADAUMRIwEAYDVQQDDAll
+... paste all lines from your device01.pem file here ...
 -----END CERTIFICATE-----";
 
+// ── Device Private Key (your device01.key) ───────────────────────────────
+// Paste the ENTIRE content of device01.key here
 private const string ClientKey =
 @"-----BEGIN RSA PRIVATE KEY-----
-<Your device private key PEM here>
+MIIEowIBAAKCAQEA2a2rwplBQLF29amygykEMmYz0+Kcj3bKBp29ByP9iFyFbENN
+... paste all lines from your device01.key file here ...
 -----END RSA PRIVATE KEY-----";
 ```
 
+> **Important embedding rules:**
+> - Use a verbatim string literal `@"..."` so that the newlines inside the PEM are preserved.
+> - Include the `-----BEGIN ...-----` and `-----END ...-----` header/footer lines.
+> - Do **not** add extra spaces or wrap lines. Copy-paste the file content exactly.
+> - Do **not** commit private keys to public repositories. For production devices, load them from secure storage at runtime.
+
+---
+
 ### Step 5 — Write the Application
+
+Replace the contents of `Program.cs` with the following. Each line has a comment explaining what it does:
 
 ```csharp
 using nanoFramework.Azure.EventGrid.Mqtt;
@@ -175,48 +424,173 @@ using nanoFramework.Networking;
 using System.Diagnostics;
 using System.Threading;
 
-public class Program
+namespace MyEventGridDevice
 {
-    public static void Main()
+    public class Program
     {
-        // Connect to Wi-Fi — blocks until connected or times out
-        if (!WifiNetworkHelper.ConnectDhcp("YOUR_SSID", "YOUR_PASSWORD",
-            requiresDateTime: true,
-            token: new CancellationTokenSource(30000).Token))
-        {
-            Debug.WriteLine("Wi-Fi failed!");
-            Thread.Sleep(Timeout.Infinite);
-            return;
-        }
+        // ── Azure Event Grid broker hostname (from Step 4e-v) ──
+        private const string BrokerHostname =
+            "my-eg-namespace.westeurope-1.ts.eventgrid.azure.net";
 
-        // Build client, connect, and start publishing
-        using (var client = new EventGridMqttClientBuilder()
-            .WithBroker("YOUR-NAMESPACE.westeurope-1.ts.eventgrid.azure.net")
-            .WithDevice("esp32-device-001")
-            .WithCertificates(CaCert, ClientCert, ClientKey)
-            .WithAutoReconnect()
-            .BuildAndConnect())
-        {
-            client.Subscribe("devices/esp32-device-001/commands");
+        // ── Device client ID — must match the --client-name in Step 4e-iii ──
+        private const string DeviceId = "esp32-device-001";
 
-            while (true)
+        // ── Wi-Fi credentials ──
+        // Note: for production devices, load credentials from secure storage
+        // rather than hardcoding them here.
+        private const string WifiSsid     = "YOUR_WIFI_SSID";
+        private const string WifiPassword = "YOUR_WIFI_PASSWORD";
+
+        public static void Main()
+        {
+            Debug.WriteLine("=== Starting up ===");
+
+            // ── 1. Connect to Wi-Fi ──────────────────────────────────────────
+            // WifiNetworkHelper.ConnectDhcp blocks until connected or the
+            // timeout fires.  requiresDateTime:true waits for the device clock
+            // to be set via NTP (required for TLS certificate validation).
+            // Increase WifiTimeoutMs to 60000 if NTP sync is slow on your network.
+            const int WifiTimeoutMs = 30000;
+            Debug.WriteLine("[WiFi] Connecting...");
+            bool wifiOk = WifiNetworkHelper.ConnectDhcp(
+                WifiSsid,
+                WifiPassword,
+                requiresDateTime: true,
+                token: new CancellationTokenSource(WifiTimeoutMs).Token);
+
+            if (!wifiOk)
             {
-                client.PublishTelemetry(new { temperature = 23.5, humidity = 60 });
-                Thread.Sleep(10000);
+                Debug.WriteLine("[WiFi] Failed! Check SSID and password.");
+                Thread.Sleep(Timeout.Infinite); // halt
+                return;
+            }
+
+            Debug.WriteLine("[WiFi] Connected.");
+
+            // ── 2. Build the MQTT client ─────────────────────────────────────
+            // EventGridMqttClientBuilder uses a fluent (chain) API.
+            // Each .WithXxx() call configures one feature.
+            // BuildAndConnect() creates the client AND opens the TLS connection.
+            using (var client = new EventGridMqttClientBuilder()
+                .WithBroker(BrokerHostname)         // Azure endpoint
+                .WithDevice(DeviceId)               // device identity
+                .WithCertificates(CaCert, ClientCert, ClientKey) // mTLS auth
+                .WithAutoReconnect()                // reconnect if Wi-Fi drops
+                .WithPublishRetry(maxRetries: 3)    // retry failed publishes
+                .BuildAndConnect())                 // connect now
+            {
+                Debug.WriteLine("[MQTT] Connected to Azure Event Grid.");
+
+                // ── 3. Subscribe to receive commands from the cloud ──────────
+                // Any message the cloud sends to this topic will fire the
+                // MessageReceived event below.
+                client.Subscribe("devices/" + DeviceId + "/commands");
+
+                // ── 4. Wire up an event handler for incoming messages ────────
+                client.MessageReceived += (sender, e) =>
+                {
+                    Debug.WriteLine("[Command] Topic:   " + e.Topic);
+                    Debug.WriteLine("[Command] Payload: " + e.Payload);
+                };
+
+                // ── 5. Publish telemetry every 10 seconds ────────────────────
+                // PublishTelemetry serialises the anonymous object to JSON and
+                // sends it to: devices/{DeviceId}/telemetry
+                int count = 0;
+                while (true)
+                {
+                    count++;
+                    client.PublishTelemetry(new
+                    {
+                        deviceId    = DeviceId,
+                        temperature = 23.5,
+                        humidity    = 60,
+                        messageNo   = count
+                    });
+                    Debug.WriteLine("[Telemetry] Sent message #" + count);
+
+                    Thread.Sleep(10000); // wait 10 seconds before next publish
+                }
             }
         }
-    }
 
-    // paste cert constants here ...
+        // ── Paste your certificate PEM strings below ────────────────────────
+
+        private const string CaCert =
+@"-----BEGIN CERTIFICATE-----
+PASTE_YOUR_DIGICERT_GLOBAL_ROOT_G2_PEM_HERE
+-----END CERTIFICATE-----";
+
+        private const string ClientCert =
+@"-----BEGIN CERTIFICATE-----
+PASTE_YOUR_DEVICE01_PEM_HERE
+-----END CERTIFICATE-----";
+
+        private const string ClientKey =
+@"-----BEGIN RSA PRIVATE KEY-----
+PASTE_YOUR_DEVICE01_KEY_HERE
+-----END RSA PRIVATE KEY-----";
+    }
 }
 ```
 
+Replace every `PASTE_YOUR_..._HERE` placeholder with the actual PEM content you copied in Step 4f.
+
+---
+
 ### Step 6 — Deploy and Run
 
-1. Connect your ESP32 via USB.
-2. In Visual Studio, select **Debug → Start Debugging** (or press **F5**).
-3. The extension deploys the application to the board over the COM port.
-4. Open **View → Output** (select **Debug** in the dropdown) to see the device logs.
+#### 6a — Connect the board
+
+Plug your ESP32 into your PC with a USB data cable. Windows should show it in **Device Manager → Ports (COM & LPT)** as it did in Step 1c.
+
+#### 6b — Select the device in Visual Studio
+
+1. In Visual Studio, look at the toolbar at the top. There is a dropdown that shows **nanoFramework Device Explorer**.
+2. If the board is not listed, go to **View → Other Windows → nanoFramework Device Explorer** and click the refresh icon.
+3. Your device will appear as e.g. `ESP32_REV0 @ COM3`. Select it.
+
+#### 6c — Deploy the application
+
+Press **F5** (or **Debug → Start Debugging**). Visual Studio will:
+1. Build the project.
+2. Push the compiled assembly to the board over the COM port.
+3. Start execution automatically.
+
+The first deployment takes up to 30 seconds. Subsequent ones are faster.
+
+#### 6d — Watch the output
+
+Open **View → Output** and select **Debug** in the dropdown. You should see:
+
+```
+=== Starting up ===
+[WiFi] Connecting...
+[WiFi] Connected.
+[EventGridMqtt] Parsing certificates...
+[EventGridMqtt] Certificates parsed successfully.
+[EventGridMqtt] Connecting to my-eg-namespace.westeurope-1.ts.eventgrid.azure.net:8883 as 'esp32-device-001'...
+[EventGridMqtt] Connected successfully.
+[EventGridMqtt] Subscribing to: devices/esp32-device-001/commands
+[MQTT] Connected to Azure Event Grid.
+[Telemetry] Sent message #1
+[Telemetry] Sent message #2
+...
+```
+
+#### 6e — Verify messages arrive in Azure
+
+Open the Azure Portal, navigate to your Event Grid Namespace, and use the **MQTT Messages** monitor or subscribe another client to confirm the telemetry is arriving.
+
+#### 6f — Common errors and fixes
+
+| Error message | Likely cause | Fix |
+|---|---|---|
+| `[WiFi] Failed!` | Wrong SSID/password, or board too far from router | Double-check `WifiSsid` and `WifiPassword` |
+| `[MQTT] Connection failed` | Certificates don't match what's registered in Azure | Re-run Step 4e-iii with the correct thumbprint |
+| `Connection failed: BadUserNameOrPassword` | Device client ID doesn't match `--client-name` in Azure | Make sure `DeviceId` equals `--client-name` |
+| `[EventGridMqtt] ERROR: Certificate ...` | PEM string has extra whitespace or missing lines | Re-copy the PEM file content; check `-----BEGIN`/`-----END` lines are present |
+| Output window is empty | `requiresDateTime:true` timed out (no NTP sync) | Set `WifiTimeoutMs` to `60000` (60 s). This can happen on networks with slow or firewalled NTP servers — the device must sync its clock before TLS certificates can be validated. |
 
 ---
 
