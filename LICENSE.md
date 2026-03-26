@@ -1,6 +1,6 @@
 # The MIT License (MIT)
 
-Copyright (c) 2026 SARAN2991
+Copyright (c) 2026 Saravanan Ganesan
 
 All rights reserved.
 
